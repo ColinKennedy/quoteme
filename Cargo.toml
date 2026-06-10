@@ -8,6 +8,14 @@ description = "Minimal Whisper-based speech-to-text transcription CLI for Window
 name = "quoteme"
 path = "src/main.rs"
 
+# CUDA build — same source, compiled with GPU support.
+# Build with: cargo build --release --features cuda --bin quoteme-cuda
+# Requires NVIDIA GPU + CUDA Toolkit 12.x installed.
+[[bin]]
+name = "quoteme-cuda"
+path = "src/main.rs"
+required-features = ["cuda"]
+
 [dependencies]
 anyhow = "1"
 arboard = "3"
@@ -36,6 +44,20 @@ windows = { version = "0.52", features = [
     "Win32_System_Threading",
     "Win32_System_Variant",
 ] }
+
+[features]
+# Enable NVIDIA GPU acceleration (requires CUDA Toolkit 12.x).
+# Used automatically when building the `quoteme-cuda` binary.
+cuda = ["whisper-rs/cuda"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[patch.crates-io]
+# whisper-rs-sys 0.9.0 defaults to CUDA arch 52;61;70, but compute_70 was
+# dropped in CUDA 13.x. This local patch overrides GGML_CUDA_ARCHITECTURES
+# to target Turing (75) and newer only.
+whisper-rs-sys = { path = "vendor/whisper-rs-sys-0.9.0" }
 
 [profile.release]
 opt-level = 3

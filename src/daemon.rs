@@ -9,7 +9,7 @@ use crate::config::{Config, RecordingMode};
 use crate::history;
 use crate::hotkey::{start_hotkey_listener, HotkeyEvent};
 use crate::paste::paste_text;
-use crate::transcription::{load_word_list, StreamingTranscriber, TranscriptionEngine};
+use crate::transcription::{load_word_list, TranscriptionEngine};
 
 // ---------------------------------------------------------------------------
 // PID file helpers
@@ -20,6 +20,13 @@ pub fn pid_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("quoteme")
         .join("daemon.pid")
+}
+
+pub fn log_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("quoteme")
+        .join("daemon.log")
 }
 
 pub fn start_daemon() -> Result<()> {
@@ -126,13 +133,20 @@ enum RecordSignal {
     Cancel,
 }
 
+/// Sent by the recording thread when audio capture ends.
 enum RecordResult {
-    Done { text: String, audio: Vec<f32>, duration: f64 },
+    /// Recording stopped normally. Audio is ready for transcription.
+    AudioReady { audio: Vec<f32>, duration: f64 },
+    /// Recording was cancelled.
     Cancelled { audio: Vec<f32> },
 }
 
+/// Sent by the transcription thread when Whisper inference completes.
+enum TranscriptionResult {
+    Done { text: String, audio: Vec<f32>, duration: f64 },
+}
+
 struct ActiveRecording {
-    /// Send Stop/Cancel without consuming the struct so result_rx stays alive.
     stop_tx: std::sync::mpsc::SyncSender<RecordSignal>,
     result_rx: std::sync::mpsc::Receiver<RecordResult>,
     /// True once we've already sent a stop/cancel signal.
@@ -172,6 +186,18 @@ pub fn run_daemon(config: Config) -> Result<()> {
         config.transcription.unload_after_secs,
     )));
 
+    // Eagerly load the model so the first transcription doesn't pay the load cost.
+    {
+        let mut eng = engine.lock().expect("engine mutex");
+        tracing::info!("Pre-loading Whisper model at daemon startup…");
+        if let Err(e) = eng.load() {
+            tracing::warn!(
+                "Model pre-load failed — daemon will retry on first transcription: {:#}",
+                e
+            );
+        }
+    }
+
     let (hotkey_tx, hotkey_rx) = std::sync::mpsc::channel::<HotkeyEvent>();
     start_hotkey_listener(
         config.hotkeys.transcribe.clone(),
@@ -179,6 +205,7 @@ pub fn run_daemon(config: Config) -> Result<()> {
         hotkey_tx,
     );
 
+    let (transcription_tx, transcription_rx) = std::sync::mpsc::channel::<TranscriptionResult>();
     let mut active: Option<ActiveRecording> = None;
 
     loop {
@@ -190,11 +217,20 @@ pub fn run_daemon(config: Config) -> Result<()> {
         }
 
         // ---- Poll for completed recording ----
+        // Clear `active` IMMEDIATELY when audio is ready so the user can start a new
+        // recording before (or while) transcription runs in its own background thread.
         if let Some(rec) = &active {
             match rec.result_rx.try_recv() {
-                Ok(RecordResult::Done { text, audio, duration }) => {
+                Ok(RecordResult::AudioReady { audio, duration }) => {
                     active = None;
-                    handle_done(&config, &text, &audio, duration);
+                    spawn_transcription(
+                        audio,
+                        duration,
+                        config.transcription.language.clone(),
+                        word_list.clone(),
+                        engine.clone(),
+                        transcription_tx.clone(),
+                    );
                 }
                 Ok(RecordResult::Cancelled { audio }) => {
                     active = None;
@@ -208,6 +244,12 @@ pub fn run_daemon(config: Config) -> Result<()> {
             }
         }
 
+        // ---- Poll for completed transcriptions ----
+        while let Ok(result) = transcription_rx.try_recv() {
+            let TranscriptionResult::Done { text, audio, duration } = result;
+            handle_done(&config, &text, &audio, duration);
+        }
+
         // ---- Process hotkey events ----
         while let Ok(event) = hotkey_rx.try_recv() {
             match event {
@@ -215,13 +257,13 @@ pub fn run_daemon(config: Config) -> Result<()> {
                     if config.hotkeys.mode == RecordingMode::Toggle {
                         if let Some(rec) = &mut active {
                             rec.signal(RecordSignal::Stop);
-                        } else if active.is_none() {
-                            active = spawn_recording(&config, &word_list, engine.clone());
+                        } else {
+                            active = spawn_recording(&config);
                         }
                     } else {
                         // PushToTalk
                         if active.is_none() {
-                            active = spawn_recording(&config, &word_list, engine.clone());
+                            active = spawn_recording(&config);
                         }
                     }
                 }
@@ -244,94 +286,112 @@ pub fn run_daemon(config: Config) -> Result<()> {
     }
 }
 
-fn spawn_recording(
-    config: &Config,
-    word_list: &str,
-    engine: Arc<Mutex<TranscriptionEngine>>,
-) -> Option<ActiveRecording> {
+fn spawn_recording(config: &Config) -> Option<ActiveRecording> {
     let (stop_tx, stop_rx) = std::sync::mpsc::sync_channel::<RecordSignal>(1);
     let (result_tx, result_rx) = std::sync::mpsc::channel::<RecordResult>();
 
-    let cfg = config.clone();
-    let wl = word_list.to_string();
+    let device = config.recording.device.clone();
+    let mute = config.recording.mute_system_audio;
 
-    if config.recording.mute_system_audio {
+    if mute {
         mute_system_audio();
     }
 
     std::thread::spawn(move || {
-        recording_thread(cfg, wl, engine, stop_rx, result_tx);
+        recording_thread(device, mute, stop_rx, result_tx);
     });
 
     Some(ActiveRecording { stop_tx, result_rx, signalled: false })
 }
 
+fn spawn_transcription(
+    audio: Vec<f32>,
+    duration: f64,
+    language: String,
+    prompt: String,
+    engine: Arc<Mutex<TranscriptionEngine>>,
+    tx: std::sync::mpsc::Sender<TranscriptionResult>,
+) {
+    tracing::debug!(
+        "Queuing transcription: {} samples ({:.2}s), language={:?}",
+        audio.len(),
+        duration,
+        language,
+    );
+    std::thread::spawn(move || {
+        tracing::info!("Transcribing {:.1}s of audio…", duration);
+        let prompt_ref: Option<&str> = if prompt.is_empty() { None } else { Some(&prompt) };
+        let result = match engine.lock() {
+            Ok(mut eng) => eng.transcribe(&audio, &language, prompt_ref),
+            Err(_) => Err(anyhow::anyhow!("Engine mutex poisoned")),
+        };
+        match result {
+            Ok(text) => {
+                tracing::info!("Transcription complete: {:?}", text.trim());
+                let _ = tx.send(TranscriptionResult::Done { text, audio, duration });
+            }
+            Err(e) => {
+                tracing::error!("Transcription failed: {:#}", e);
+                let _ = tx.send(TranscriptionResult::Done {
+                    text: String::new(),
+                    audio,
+                    duration,
+                });
+            }
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 
 fn recording_thread(
-    config: Config,
-    word_list: String,
-    engine: Arc<Mutex<TranscriptionEngine>>,
+    device: String,
+    mute: bool,
     stop_rx: std::sync::mpsc::Receiver<RecordSignal>,
     result_tx: std::sync::mpsc::Sender<RecordResult>,
 ) {
-    let capture = match AudioCapture::start(&config.recording.device) {
-        Ok(c) => c,
+    let capture = match AudioCapture::start(&device) {
+        Ok(c) => {
+            tracing::debug!("Audio capture started (device: {:?})", device);
+            c
+        }
         Err(e) => {
-            eprintln!("Failed to start audio capture: {}", e);
+            tracing::error!("Failed to start audio capture: {:#}", e);
+            let _ = result_tx.send(RecordResult::Cancelled { audio: Vec::new() });
             return;
         }
     };
 
-    let mut transcriber = StreamingTranscriber::new(
-        engine,
-        config.transcription.language.clone(),
-        word_list,
-    );
-
+    let mut audio: Vec<f32> = Vec::new();
     let start = Instant::now();
     tracing::info!("Recording…");
 
     loop {
-        let samples = capture.take_samples();
-        if !samples.is_empty() {
-            transcriber.push_audio(&samples);
-            if let Some(chunk_text) = transcriber.try_transcribe_chunk() {
-                tracing::debug!("[streaming] {}", chunk_text.trim());
-            }
-        }
-
+        // Check the stop signal at the top of every iteration. The recording thread
+        // no longer runs Whisper, so it responds in < 100ms regardless of model size.
         match stop_rx.try_recv() {
             Ok(RecordSignal::Stop) => {
-                // Drain the last few samples
                 let tail = capture.take_samples();
-                transcriber.push_audio(&tail);
-                let duration = start.elapsed().as_secs_f64();
-
-                if config.recording.mute_system_audio {
+                // Drop the capture stream immediately so the OS mic indicator clears
+                // before the (potentially slow) transcription begins in its own thread.
+                drop(capture);
+                audio.extend_from_slice(&tail);
+                if mute {
                     unmute_system_audio();
                 }
-
-                tracing::info!("Transcribing {:.1}s of audio…", duration);
-                match transcriber.finish() {
-                    Ok((text, audio)) => {
-                        tracing::info!("Transcription complete: {}", text.trim());
-                        let _ = result_tx.send(RecordResult::Done { text, audio, duration });
-                    }
-                    Err(e) => eprintln!("Transcription failed: {}", e),
-                }
+                let duration = start.elapsed().as_secs_f64();
+                tracing::info!("Recording stopped ({:.1}s), queuing transcription…", duration);
+                let _ = result_tx.send(RecordResult::AudioReady { audio, duration });
                 return;
             }
             Ok(RecordSignal::Cancel) => {
                 let tail = capture.take_samples();
-                transcriber.push_audio(&tail);
-
-                if config.recording.mute_system_audio {
+                drop(capture);
+                audio.extend_from_slice(&tail);
+                if mute {
                     unmute_system_audio();
                 }
-
                 tracing::info!("Recording cancelled");
-                let (_, audio) = transcriber.finish().unwrap_or_default();
                 let _ = result_tx.send(RecordResult::Cancelled { audio });
                 return;
             }
@@ -339,6 +399,8 @@ fn recording_thread(
             Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
         }
 
+        let samples = capture.take_samples();
+        audio.extend_from_slice(&samples);
         std::thread::sleep(Duration::from_millis(40));
     }
 }
@@ -364,4 +426,132 @@ fn handle_cancelled(config: &Config, audio: &[f32]) {
         }
     }
     let _ = history::cleanup(&config.history);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_active() -> (ActiveRecording, std::sync::mpsc::Sender<RecordResult>) {
+        let (stop_tx, _stop_rx) = std::sync::mpsc::sync_channel::<RecordSignal>(1);
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<RecordResult>();
+        (ActiveRecording { stop_tx, result_rx, signalled: false }, result_tx)
+    }
+
+    #[test]
+    fn audio_ready_clears_active() {
+        let (active_rec, result_tx) = make_active();
+        let mut active: Option<ActiveRecording> = Some(active_rec);
+
+        result_tx.send(RecordResult::AudioReady { audio: vec![], duration: 1.0 }).unwrap();
+
+        if let Some(rec) = &active {
+            if let Ok(RecordResult::AudioReady { .. }) = rec.result_rx.try_recv() {
+                active = None;
+            }
+        }
+
+        assert!(active.is_none(), "active must clear on AudioReady so a new recording can start");
+    }
+
+    #[test]
+    fn cancelled_clears_active() {
+        let (active_rec, result_tx) = make_active();
+        let mut active: Option<ActiveRecording> = Some(active_rec);
+
+        result_tx.send(RecordResult::Cancelled { audio: vec![] }).unwrap();
+
+        if let Some(rec) = &active {
+            if let Ok(RecordResult::Cancelled { .. }) = rec.result_rx.try_recv() {
+                active = None;
+            }
+        }
+
+        assert!(active.is_none());
+    }
+
+    #[test]
+    fn second_recording_can_start_while_first_transcribes() {
+        // Simulate: record → stop → record again before transcription finishes.
+        let (active_rec1, result_tx1) = make_active();
+        let mut active: Option<ActiveRecording> = Some(active_rec1);
+
+        // First recording finishes — audio returned immediately, no transcription yet.
+        result_tx1.send(RecordResult::AudioReady { audio: vec![], duration: 0.5 }).unwrap();
+
+        // Daemon loop: receive AudioReady, clear active (transcription spawned separately).
+        if let Some(rec) = &active {
+            if let Ok(RecordResult::AudioReady { .. }) = rec.result_rx.try_recv() {
+                active = None;
+            }
+        }
+        assert!(active.is_none(), "active must be None before second recording can start");
+
+        // User presses RAlt again — second recording starts immediately.
+        let (active_rec2, _result_tx2) = make_active();
+        active = Some(active_rec2);
+        assert!(active.is_some(), "second recording started while first is still transcribing");
+    }
+
+    #[test]
+    fn stop_signal_sent_only_once() {
+        let (mut active_rec, _result_tx) = make_active();
+
+        active_rec.signal(RecordSignal::Stop);
+        assert!(active_rec.signalled);
+
+        // Second signal must not panic even though channel is already full.
+        active_rec.signal(RecordSignal::Cancel);
+        assert!(active_rec.signalled);
+    }
+
+    #[test]
+    fn cancel_signal_sent_only_once() {
+        let (mut active_rec, _result_tx) = make_active();
+
+        active_rec.signal(RecordSignal::Cancel);
+        assert!(active_rec.signalled);
+
+        active_rec.signal(RecordSignal::Stop);
+        assert!(active_rec.signalled);
+    }
+
+    #[test]
+    fn audio_ready_carries_audio_and_duration() {
+        let (active_rec, result_tx) = make_active();
+        let active = Some(active_rec);
+
+        result_tx
+            .send(RecordResult::AudioReady { audio: vec![0.1, 0.2, 0.3], duration: 2.5 })
+            .unwrap();
+
+        if let Some(rec) = &active {
+            match rec.result_rx.try_recv() {
+                Ok(RecordResult::AudioReady { audio, duration }) => {
+                    assert_eq!(duration, 2.5);
+                    assert_eq!(audio.len(), 3);
+                }
+                _ => panic!("Expected AudioReady"),
+            }
+        }
+    }
+
+    #[test]
+    fn no_result_while_recording_leaves_active() {
+        let (active_rec, _result_tx) = make_active();
+        let mut active: Option<ActiveRecording> = Some(active_rec);
+
+        // Nothing sent on result_tx — active should remain Some.
+        if let Some(rec) = &active {
+            if let Ok(RecordResult::AudioReady { .. }) = rec.result_rx.try_recv() {
+                active = None;
+            }
+        }
+
+        assert!(active.is_some(), "active must stay Some while recording is in progress");
+    }
 }

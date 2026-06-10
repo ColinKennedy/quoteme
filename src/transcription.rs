@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -21,26 +20,52 @@ impl TranscriptionEngine {
         }
     }
 
+    /// Eagerly load the model. Call at daemon startup so the first transcription
+    /// doesn't pay the load cost. Errors here are non-fatal — the model will be
+    /// retried on the first `transcribe()` call.
+    pub fn load(&mut self) -> Result<()> {
+        self.ensure_loaded()
+    }
+
     fn ensure_loaded(&mut self) -> Result<()> {
         if self.ctx.is_some() {
             return Ok(());
         }
         if self.model_path.is_empty() {
             anyhow::bail!(
-                "No model path configured. Run: quoteme config transcription.model_path <path>"
+                "No model path configured. Run: quoteme config set transcription.model_path <path>"
             );
         }
         if !Path::new(&self.model_path).exists() {
             anyhow::bail!("Whisper model not found at: {}", self.model_path);
         }
-        tracing::info!("Loading Whisper model from {}", self.model_path);
-        let ctx = WhisperContext::new_with_params(
-            &self.model_path,
-            WhisperContextParameters::default(),
-        )
-        .context("Failed to load Whisper model")?;
+
+        // use_gpu is true when compiled with the `cuda` feature (quoteme-cuda binary).
+        let ctx_params = WhisperContextParameters::default();
+        tracing::info!(
+            "Loading Whisper model: \"{}\" (use_gpu={}{})",
+            self.model_path,
+            ctx_params.use_gpu,
+            if !ctx_params.use_gpu {
+                " — CPU only; build quoteme-cuda with --features cuda for GPU"
+            } else {
+                ""
+            },
+        );
+
+        let t = Instant::now();
+        let ctx = WhisperContext::new_with_params(&self.model_path, ctx_params)
+            .with_context(|| {
+                format!(
+                    "Failed to load Whisper model from \"{}\". \
+                     whisper.cpp requires a GGML/GGUF .bin file — not .safetensors or .pt. \
+                     Download a compatible model from https://huggingface.co/ggerganov/whisper.cpp",
+                    self.model_path
+                )
+            })?;
+        tracing::info!("Whisper model loaded in {:.2}s", t.elapsed().as_secs_f64());
+
         self.ctx = Some(ctx);
-        tracing::info!("Whisper model loaded");
         Ok(())
     }
 
@@ -64,11 +89,28 @@ impl TranscriptionEngine {
         language: &str,
         initial_prompt: Option<&str>,
     ) -> Result<String> {
+        let audio_secs = audio.len() as f64 / 16_000.0;
+        tracing::debug!(
+            "Transcription request: {} samples ({:.2}s audio), language={:?}, prompt_chars={}",
+            audio.len(),
+            audio_secs,
+            language,
+            initial_prompt.map_or(0, |p| p.len()),
+        );
+
+        let load_start = Instant::now();
         self.ensure_loaded()?;
+        let load_elapsed = load_start.elapsed().as_secs_f64();
+        if load_elapsed > 0.05 {
+            tracing::info!("Model load took {:.2}s", load_elapsed);
+        }
         self.last_used = Instant::now();
 
         let ctx = self.ctx.as_ref().unwrap();
+        tracing::debug!("Creating Whisper state…");
+        let state_start = Instant::now();
         let mut state = ctx.create_state().context("Failed to create Whisper state")?;
+        tracing::debug!("State created in {:.3}s", state_start.elapsed().as_secs_f64());
 
         let lang_owned = language.to_string();
         let prompt_owned = initial_prompt.unwrap_or("").to_string();
@@ -82,11 +124,24 @@ impl TranscriptionEngine {
         params.set_no_context(true);
         if !prompt_owned.is_empty() {
             params.set_initial_prompt(prompt_owned.as_str());
+            tracing::debug!("Using initial prompt ({} chars)", prompt_owned.len());
         }
 
+        tracing::info!("Running Whisper inference on {:.2}s of audio…", audio_secs);
+        let inference_start = Instant::now();
         state.full(params, audio).context("Whisper transcription failed")?;
+        let inference_secs = inference_start.elapsed().as_secs_f64();
+        let rtf = inference_secs / audio_secs.max(0.001);
+        tracing::info!(
+            "Inference complete: {:.2}s wall-clock for {:.2}s audio ({:.2}x realtime factor{})",
+            inference_secs,
+            audio_secs,
+            rtf,
+            if rtf > 2.0 { " — consider a smaller model or enabling CUDA" } else { "" },
+        );
 
         let n = state.full_n_segments().context("Failed to get segment count")?;
+        tracing::debug!("Collecting {} segment(s)…", n);
         let mut text = String::new();
         for i in 0..n {
             text.push_str(
@@ -95,7 +150,14 @@ impl TranscriptionEngine {
                     .context("Failed to get segment text")?,
             );
         }
-        Ok(text.trim().to_string())
+        let text = text.trim().to_string();
+        tracing::debug!(
+            "Transcription result: {:?} ({} chars, {} segments)",
+            text,
+            text.len(),
+            n,
+        );
+        Ok(text)
     }
 }
 
@@ -115,119 +177,4 @@ pub fn load_word_list(path: &str) -> Result<String> {
         .filter(|w| !w.is_empty())
         .collect();
     Ok(words.join(", "))
-}
-
-// ---------------------------------------------------------------------------
-// Streaming (chunked) transcriber
-// ---------------------------------------------------------------------------
-
-const CHUNK_SAMPLES: usize = (3.0 * 16000.0) as usize; // 3-second chunks at 16 kHz
-const OVERLAP_SAMPLES: usize = (0.5 * 16000.0) as usize;
-
-pub struct StreamingTranscriber {
-    engine: Arc<Mutex<TranscriptionEngine>>,
-    language: String,
-    initial_prompt: String,
-    audio: Vec<f32>,
-    next_chunk_start: usize,
-    context_text: String,
-}
-
-impl StreamingTranscriber {
-    pub fn new(
-        engine: Arc<Mutex<TranscriptionEngine>>,
-        language: String,
-        initial_prompt: String,
-    ) -> Self {
-        Self {
-            engine,
-            language,
-            initial_prompt,
-            audio: Vec::new(),
-            next_chunk_start: 0,
-            context_text: String::new(),
-        }
-    }
-
-    pub fn push_audio(&mut self, samples: &[f32]) {
-        self.audio.extend_from_slice(samples);
-    }
-
-    /// Transcribe the next pending chunk if enough audio has accumulated.
-    /// Returns newly transcribed text when a chunk is processed.
-    pub fn try_transcribe_chunk(&mut self) -> Option<String> {
-        let start = self.next_chunk_start.saturating_sub(OVERLAP_SAMPLES);
-        let end = start + CHUNK_SAMPLES;
-        if self.audio.len() < end {
-            return None;
-        }
-
-        let chunk = self.audio[start..end].to_vec();
-        let prompt = self.build_prompt();
-
-        match self.engine.lock() {
-            Ok(mut engine) => match engine.transcribe(&chunk, &self.language, Some(&prompt)) {
-                Ok(text) if !text.is_empty() => {
-                    self.context_text.push(' ');
-                    self.context_text.push_str(&text);
-                    self.next_chunk_start = end;
-                    Some(text)
-                }
-                Ok(_) => {
-                    self.next_chunk_start = end;
-                    None
-                }
-                Err(e) => {
-                    tracing::error!("Chunk transcription failed: {}", e);
-                    None
-                }
-            },
-            Err(_) => None,
-        }
-    }
-
-    /// Transcribe the entire accumulated audio in one final pass for highest accuracy.
-    /// Returns (transcribed_text, raw_audio).
-    pub fn finish(self) -> Result<(String, Vec<f32>)> {
-        let audio = self.audio;
-        if audio.is_empty() {
-            return Ok((String::new(), audio));
-        }
-
-        let prompt = {
-            let mut parts = Vec::new();
-            if !self.context_text.is_empty() {
-                let ctx = self.context_text.trim();
-                let tail = if ctx.len() > 200 { &ctx[ctx.len() - 200..] } else { ctx };
-                parts.push(tail.to_string());
-            }
-            if !self.initial_prompt.is_empty() {
-                parts.push(self.initial_prompt.clone());
-            }
-            parts.join(" ")
-        };
-
-        let text = {
-            let mut engine = self
-                .engine
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Engine mutex poisoned"))?;
-            engine.transcribe(&audio, &self.language, Some(&prompt))?
-        };
-
-        Ok((text, audio))
-    }
-
-    fn build_prompt(&self) -> String {
-        let mut parts = Vec::new();
-        if !self.context_text.is_empty() {
-            let ctx = self.context_text.trim();
-            let tail = if ctx.len() > 200 { &ctx[ctx.len() - 200..] } else { ctx };
-            parts.push(tail.to_string());
-        }
-        if !self.initial_prompt.is_empty() {
-            parts.push(self.initial_prompt.clone());
-        }
-        parts.join(" ")
-    }
 }
