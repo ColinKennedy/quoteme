@@ -203,7 +203,7 @@ fn cmd_list_microphone() -> Result<()> {
         println!("  {}. {}{}", i + 1, name, tag);
     }
     println!();
-    println!("To set a microphone: quoteme config add microphone");
+    println!("To set a microphone: quoteme config set-interactive microphone");
     println!("To set manually:     quoteme config set recording.device \"<name or substring>\"");
     Ok(())
 }
