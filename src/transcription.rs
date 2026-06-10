@@ -83,6 +83,19 @@ impl TranscriptionEngine {
         }
     }
 
+    pub fn update_model(&mut self, new_path: String, unload_after_secs: u64) {
+        if new_path != self.model_path {
+            tracing::info!(
+                "Model path changed ({:?} → {:?}), unloading current model",
+                self.model_path,
+                new_path,
+            );
+            self.ctx = None;
+            self.model_path = new_path;
+        }
+        self.unload_after_secs = unload_after_secs;
+    }
+
     pub fn transcribe(
         &mut self,
         audio: &[f32],

@@ -47,7 +47,11 @@ enum Command {
 #[derive(Subcommand)]
 enum ListAction {
     /// List all history entries.
-    History,
+    History {
+        /// Copy the transcription at index N to the clipboard (1-based, matches list output).
+        #[arg(long, value_name = "N")]
+        copy_index: Option<usize>,
+    },
     /// Print the active configuration.
     Configuration {
         /// Show only values explicitly set in the config file (omit defaults).
@@ -106,8 +110,8 @@ fn main() -> Result<()> {
             let cfg = config::load_config()?;
             daemon::run_daemon(cfg)?;
         }
-        Some(Command::List { action: ListAction::History }) => {
-            cmd_history_list()?;
+        Some(Command::List { action: ListAction::History { copy_index } }) => {
+            cmd_history_list(copy_index)?;
         }
         Some(Command::List { action: ListAction::Configuration { no_fallbacks } }) => {
             cmd_list_configuration(no_fallbacks)?;
@@ -423,12 +427,23 @@ fn print_check(item: health::CheckItem) {
 // list history
 // ---------------------------------------------------------------------------
 
-fn cmd_history_list() -> Result<()> {
+fn cmd_history_list(copy_index: Option<usize>) -> Result<()> {
     let cfg = config::load_config()?;
     let entries = history::list_entries(&cfg.history)?;
 
     if entries.is_empty() {
         println!("No history entries.");
+        return Ok(());
+    }
+
+    if let Some(n) = copy_index {
+        if n == 0 || n > entries.len() {
+            anyhow::bail!("Index {} out of range (1–{})", n, entries.len());
+        }
+        let text = &entries[n - 1].text;
+        let mut clipboard = arboard::Clipboard::new().context("Failed to open clipboard")?;
+        clipboard.set_text(text).context("Failed to copy to clipboard")?;
+        println!("Copied entry {} to clipboard ({} chars)", n, text.len());
         return Ok(());
     }
 

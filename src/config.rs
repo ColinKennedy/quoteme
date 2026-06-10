@@ -164,6 +164,13 @@ pub fn config_path() -> PathBuf {
         .join("config.toml")
 }
 
+pub fn reload_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(APP_NAME)
+        .join("reload")
+}
+
 pub fn load_config_from_path(path: &Path) -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
@@ -264,7 +271,10 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
 }
 
 pub fn set_config_value(key: &str, value: &str) -> Result<()> {
-    set_config_value_at(&config_path(), key, value)
+    set_config_value_at(&config_path(), key, value)?;
+    // Signal the running daemon to reload config on its next idle tick.
+    let _ = std::fs::write(reload_path(), "");
+    Ok(())
 }
 
 #[cfg(test)]

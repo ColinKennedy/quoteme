@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::audio::AudioCapture;
 use crate::audio_mute::{mute_system_audio, unmute_system_audio};
-use crate::config::{Config, RecordingMode};
+use crate::config::{self, Config, RecordingMode};
 use crate::history;
 use crate::hotkey::{start_hotkey_listener, HotkeyEvent};
 use crate::paste::paste_text;
@@ -166,7 +166,7 @@ impl ActiveRecording {
 // Main daemon loop
 // ---------------------------------------------------------------------------
 
-pub fn run_daemon(config: Config) -> Result<()> {
+pub fn run_daemon(mut config: Config) -> Result<()> {
     tracing::info!(
         "Daemon started — transcribe={} cancel={} mode={:?}",
         config.hotkeys.transcribe,
@@ -180,7 +180,10 @@ pub fn run_daemon(config: Config) -> Result<()> {
         config.hotkeys.cancel,
     );
 
-    let word_list = load_word_list(&config.transcription.word_list_path)?;
+    // Discard any reload sentinel left over from a previous daemon instance.
+    let _ = std::fs::remove_file(config::reload_path());
+
+    let mut word_list = load_word_list(&config.transcription.word_list_path)?;
     let engine = Arc::new(Mutex::new(TranscriptionEngine::new(
         config.transcription.model_path.clone(),
         config.transcription.unload_after_secs,
@@ -209,6 +212,42 @@ pub fn run_daemon(config: Config) -> Result<()> {
     let mut active: Option<ActiveRecording> = None;
 
     loop {
+        // ---- Apply pending config reload (written by `quoteme config set`) ----
+        // Only apply when no recording is in progress to avoid mid-flight surprises.
+        if active.is_none() {
+            let rp = config::reload_path();
+            if rp.exists() {
+                let _ = std::fs::remove_file(&rp);
+                match config::load_config() {
+                    Ok(new_cfg) => {
+                        if new_cfg.hotkeys.transcribe != config.hotkeys.transcribe
+                            || new_cfg.hotkeys.cancel != config.hotkeys.cancel
+                            || new_cfg.hotkeys.mode != config.hotkeys.mode
+                        {
+                            tracing::warn!(
+                                "Hotkey config changed — restart the daemon for hotkey changes to take effect"
+                            );
+                        }
+                        {
+                            let mut eng = engine.lock().expect("engine mutex");
+                            eng.update_model(
+                                new_cfg.transcription.model_path.clone(),
+                                new_cfg.transcription.unload_after_secs,
+                            );
+                        }
+                        word_list = load_word_list(&new_cfg.transcription.word_list_path)
+                            .unwrap_or_default();
+                        tracing::info!(
+                            "Config reloaded — model={:?}",
+                            new_cfg.transcription.model_path
+                        );
+                        config = new_cfg;
+                    }
+                    Err(e) => tracing::warn!("Failed to reload config: {:#}", e),
+                }
+            }
+        }
+
         // ---- Unload model if idle ----
         if let Ok(mut eng) = engine.try_lock() {
             if eng.should_unload() {
