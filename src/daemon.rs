@@ -388,13 +388,14 @@ fn spawn_recording(config: &Config) -> Option<ActiveRecording> {
 
     let device = config.recording.device.clone();
     let mute = config.recording.mute_system_audio;
+    let silence_timeout_secs = config.recording.silence_timeout_secs;
 
     if mute {
         mute_system_audio();
     }
 
     std::thread::spawn(move || {
-        recording_thread(device, mute, stop_rx, result_tx);
+        recording_thread(device, mute, silence_timeout_secs, stop_rx, result_tx);
     });
 
     Some(ActiveRecording { stop_tx, result_rx, signalled: false })
@@ -443,6 +444,7 @@ fn spawn_transcription(
 fn recording_thread(
     device: String,
     mute: bool,
+    silence_timeout_secs: u64,
     stop_rx: std::sync::mpsc::Receiver<RecordSignal>,
     result_tx: std::sync::mpsc::Sender<RecordResult>,
 ) {
@@ -460,6 +462,10 @@ fn recording_thread(
 
     let mut audio: Vec<f32> = Vec::new();
     let start = Instant::now();
+    // Silence auto-stop: reset whenever speech is detected.
+    let mut last_speech_at = Instant::now();
+    // RMS threshold distinguishing speech from background noise.
+    const SILENCE_RMS_THRESHOLD: f32 = 0.01;
     tracing::info!("Recording…");
 
     loop {
@@ -496,7 +502,38 @@ fn recording_thread(
         }
 
         let samples = capture.take_samples();
+
+        if !samples.is_empty() {
+            let rms: f32 = {
+                let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+                (sum_sq / samples.len() as f32).sqrt()
+            };
+            if rms > SILENCE_RMS_THRESHOLD {
+                last_speech_at = Instant::now();
+            }
+        }
+
         audio.extend_from_slice(&samples);
+
+        if silence_timeout_secs > 0
+            && last_speech_at.elapsed() >= Duration::from_secs(silence_timeout_secs)
+        {
+            let tail = capture.take_samples();
+            drop(capture);
+            audio.extend_from_slice(&tail);
+            if mute {
+                unmute_system_audio();
+            }
+            let duration = start.elapsed().as_secs_f64();
+            tracing::info!(
+                "Auto-stopped after {}s of silence ({:.1}s total), queuing transcription…",
+                silence_timeout_secs,
+                duration,
+            );
+            let _ = result_tx.send(RecordResult::AudioReady { audio, duration });
+            return;
+        }
+
         std::thread::sleep(Duration::from_millis(40));
     }
 }

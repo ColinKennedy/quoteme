@@ -87,6 +87,7 @@ Each recording is stored as a UUID-named subdirectory under `%APPDATA%\quoteme\h
 | `hotkeys.mode` | `toggle` | `toggle` or `push_to_talk` |
 | `recording.device` | *(empty — default mic)* | Substring match against device name |
 | `recording.mute_system_audio` | `false` | Mute speakers while recording (Windows only) |
+| `recording.silence_timeout_secs` | `20` | Auto-stop after N seconds of silence; minimum 1 |
 | `transcription.model_path` | *(required)* | Path to `.bin` Whisper model file |
 | `transcription.language` | `en` | BCP-47 language code |
 | `transcription.word_list_path` | *(empty)* | Plain text / CSV of preferred spellings |

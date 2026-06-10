@@ -24,6 +24,7 @@ fn default_hotkey_cancel() -> String { "Escape".to_string() }
 fn default_recording_mode() -> RecordingMode { RecordingMode::Toggle }
 fn default_language() -> String { "en".to_string() }
 fn default_unload_after_secs() -> u64 { 300 }
+fn default_silence_timeout_secs() -> u64 { 20 }
 fn default_paste_method() -> PasteMethod { PasteMethod::CtrlV }
 fn default_restore_clipboard() -> bool { true }
 
@@ -54,6 +55,9 @@ pub struct RecordingConfig {
     pub device: String,
     #[serde(default)]
     pub mute_system_audio: bool,
+    /// Seconds of silence before recording auto-stops. 0 = disabled.
+    #[serde(default = "default_silence_timeout_secs")]
+    pub silence_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +117,7 @@ impl Default for RecordingConfig {
         Self {
             device: String::new(),
             mute_system_audio: false,
+            silence_timeout_secs: 20,
         }
     }
 }
@@ -217,6 +222,15 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
             config.recording.mute_system_audio =
                 value.parse().context("Expected 'true' or 'false'")?;
         }
+        "recording.silence_timeout_secs" => {
+            let v: u64 = value.parse().context("Expected a positive number")?;
+            if v == 0 {
+                anyhow::bail!(
+                    "silence_timeout_secs must be at least 1 (set a large number to effectively disable auto-stop)"
+                );
+            }
+            config.recording.silence_timeout_secs = v;
+        }
         "transcription.model_path" => config.transcription.model_path = value.to_string(),
         "transcription.language" => config.transcription.language = value.to_string(),
         "transcription.word_list_path" => {
@@ -267,6 +281,7 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
                 "paste.restore_clipboard",
                 "recording.device",
                 "recording.mute_system_audio",
+                "recording.silence_timeout_secs",
                 "transcription.language",
                 "transcription.model_path",
                 "transcription.unload_after_secs",
