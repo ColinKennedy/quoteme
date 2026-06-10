@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::config::{HotkeysConfig, RecordingMode};
+
 #[derive(Debug, PartialEq)]
 pub enum Status {
     Ok,
@@ -28,6 +30,39 @@ impl CheckItem {
         Self { status: Status::Info, message: msg.into() }
     }
     pub fn is_ok(&self) -> bool { self.status == Status::Ok }
+}
+
+pub fn check_repaste_hotkey(hotkeys: &HotkeysConfig) -> CheckItem {
+    if hotkeys.repaste.is_empty() {
+        return CheckItem::info("Repaste hotkey: not configured (optional)");
+    }
+
+    if hotkeys.repaste.eq_ignore_ascii_case(&hotkeys.cancel) {
+        return CheckItem::fail(format!(
+            "Repaste hotkey conflict: repaste and cancel are both bound to \"{}\"",
+            hotkeys.repaste
+        ));
+    }
+
+    if hotkeys.repaste.eq_ignore_ascii_case(&hotkeys.transcribe)
+        && hotkeys.mode == RecordingMode::PushToTalk
+    {
+        return CheckItem::fail(format!(
+            "Repaste hotkey conflict: repaste is bound to \"{}\" (same as transcribe) \
+             but mode is push_to_talk — hold is already used for recording. \
+             Use a different repaste key or switch to toggle mode.",
+            hotkeys.repaste
+        ));
+    }
+
+    if hotkeys.repaste.eq_ignore_ascii_case(&hotkeys.transcribe) {
+        CheckItem::ok(format!(
+            "Repaste hotkey: \"{}\" — tap to record, hold to repaste (shared with transcribe)",
+            hotkeys.repaste
+        ))
+    } else {
+        CheckItem::ok(format!("Repaste hotkey: \"{}\"", hotkeys.repaste))
+    }
 }
 
 pub fn check_hotkeys(transcribe: &str, cancel: &str) -> CheckItem {

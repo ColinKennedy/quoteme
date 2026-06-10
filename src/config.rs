@@ -24,7 +24,7 @@ fn default_hotkey_cancel() -> String { "Escape".to_string() }
 fn default_recording_mode() -> RecordingMode { RecordingMode::Toggle }
 fn default_language() -> String { "en".to_string() }
 fn default_unload_after_secs() -> u64 { 300 }
-fn default_paste_method() -> PasteMethod { PasteMethod::Immediate }
+fn default_paste_method() -> PasteMethod { PasteMethod::CtrlV }
 fn default_restore_clipboard() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +35,10 @@ pub struct HotkeysConfig {
     pub cancel: String,
     #[serde(default = "default_recording_mode")]
     pub mode: RecordingMode,
+    /// Key to re-paste the last transcription. Empty = disabled.
+    /// If set to the same key as `transcribe` (toggle mode only): tap = record, hold = repaste.
+    #[serde(default)]
+    pub repaste: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -75,7 +79,8 @@ pub struct PasteConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PasteMethod {
-    Immediate,
+    CtrlV,
+    CtrlShiftV,
     Clipboard,
     None,
 }
@@ -98,6 +103,7 @@ impl Default for HotkeysConfig {
             transcribe: "RAlt".to_string(),
             cancel: "Escape".to_string(),
             mode: RecordingMode::Toggle,
+            repaste: String::new(),
         }
     }
 }
@@ -125,7 +131,7 @@ impl Default for TranscriptionConfig {
 impl Default for PasteConfig {
     fn default() -> Self {
         Self {
-            method: PasteMethod::Immediate,
+            method: PasteMethod::CtrlV,
             restore_clipboard: true,
         }
     }
@@ -198,6 +204,7 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
     match key {
         "hotkeys.transcribe" => config.hotkeys.transcribe = value.to_string(),
         "hotkeys.cancel" => config.hotkeys.cancel = value.to_string(),
+        "hotkeys.repaste" => config.hotkeys.repaste = value.to_string(),
         "hotkeys.mode" => {
             config.hotkeys.mode = match value {
                 "toggle" => RecordingMode::Toggle,
@@ -221,11 +228,12 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
         }
         "paste.method" => {
             config.paste.method = match value {
-                "immediate" => PasteMethod::Immediate,
+                "ctrl_v" => PasteMethod::CtrlV,
+                "ctrl_shift_v" => PasteMethod::CtrlShiftV,
                 "clipboard" => PasteMethod::Clipboard,
                 "none" => PasteMethod::None,
                 _ => anyhow::bail!(
-                    "Invalid paste method: '{}'. Use 'immediate', 'clipboard', or 'none'",
+                    "Invalid paste method: '{}'. Use 'ctrl_v', 'ctrl_shift_v', 'clipboard', or 'none'",
                     value
                 ),
             };
@@ -253,6 +261,7 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
                 "history.save_cancelled",
                 "hotkeys.cancel",
                 "hotkeys.mode",
+                "hotkeys.repaste",
                 "hotkeys.transcribe",
                 "paste.method",
                 "paste.restore_clipboard",
@@ -303,7 +312,7 @@ mod tests {
         assert_eq!(cfg.transcription.language, "en");
         assert!(cfg.transcription.word_list_path.is_empty());
         assert_eq!(cfg.transcription.unload_after_secs, 300);
-        assert_eq!(cfg.paste.method, PasteMethod::Immediate);
+        assert_eq!(cfg.paste.method, PasteMethod::CtrlV);
         assert!(cfg.paste.restore_clipboard);
         assert!(cfg.history.path.is_empty());
         assert_eq!(cfg.history.max_recordings, 0);
@@ -438,7 +447,8 @@ mod tests {
         for (input, expected) in [
             ("clipboard", PasteMethod::Clipboard),
             ("none", PasteMethod::None),
-            ("immediate", PasteMethod::Immediate),
+            ("ctrl_v", PasteMethod::CtrlV),
+            ("ctrl_shift_v", PasteMethod::CtrlShiftV),
         ] {
             set_config_value_at(&path, "paste.method", input).unwrap();
             let cfg = load_config_from_path(&path).unwrap();
@@ -488,6 +498,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let err = set_config_value_at(&path, "paste.method", "foobar").unwrap_err();
         assert!(err.to_string().contains("Invalid paste method"));
+        assert!(err.to_string().contains("ctrl_v"));
     }
 
     #[test]

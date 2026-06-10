@@ -7,6 +7,7 @@ mod history;
 mod hotkey;
 mod paste;
 mod transcription;
+mod vad;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -283,18 +284,32 @@ fn cmd_list_configuration(no_fallbacks: bool) -> Result<()> {
             println!();
         }
     } else {
-        let cfg = config::load_config()?;
-        let toml_str = toml::to_string_pretty(&cfg)?;
+        // Always print the path first so the user knows where to look.
         if path.exists() {
             println!("Active configuration ({})\n", path.display());
         } else {
             println!("Active configuration — all defaults (no config file at {})\n", path.display());
         }
-        print!("{}", toml_str.trim_end());
-        println!();
+
+        match config::load_config() {
+            Ok(cfg) => {
+                print!("{}", toml::to_string_pretty(&cfg)?.trim_end());
+                println!();
+            }
+            Err(e) => {
+                println!("[error] Could not parse config: {:#}", e);
+                if path.exists() {
+                    println!("\nRaw file contents:");
+                    let raw = std::fs::read_to_string(&path)?;
+                    print!("{}", raw.trim_end());
+                    println!();
+                }
+            }
+        }
     }
 
-    let cfg = config::load_config()?;
+    // Use defaults for derived paths if config is unparseable.
+    let cfg = config::load_config().unwrap_or_default();
     println!();
     println!("# Derived paths (resolved at runtime)");
     println!("history = {}", history::history_dir(&cfg.history).display());
@@ -410,6 +425,7 @@ fn cmd_check_health(minimal: bool) -> Result<()> {
 
     // Hotkeys
     print_check(health::check_hotkeys(&cfg.hotkeys.transcribe, &cfg.hotkeys.cancel));
+    print_check(health::check_repaste_hotkey(&cfg.hotkeys));
 
     Ok(())
 }

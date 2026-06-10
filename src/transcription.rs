@@ -3,6 +3,8 @@ use std::path::Path;
 use std::time::Instant;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+use crate::vad;
+
 pub struct TranscriptionEngine {
     ctx: Option<WhisperContext>,
     model_path: String,
@@ -118,6 +120,10 @@ impl TranscriptionEngine {
             tracing::info!("Model load took {:.2}s", load_elapsed);
         }
         self.last_used = Instant::now();
+
+        let audio = vad::filter_silence(audio);
+        let audio = audio.as_slice();
+        let audio_secs = audio.len() as f64 / 16_000.0;
 
         let ctx = self.ctx.as_ref().unwrap();
         tracing::debug!("Creating Whisper state…");

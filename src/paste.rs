@@ -10,7 +10,7 @@ pub fn paste_text(text: &str, method: &PasteMethod, restore_clipboard: bool) -> 
             set_clipboard(text)?;
             tracing::info!("Text copied to clipboard ({} chars)", text.len());
         }
-        PasteMethod::Immediate => {
+        PasteMethod::CtrlV | PasteMethod::CtrlShiftV => {
             let saved = if restore_clipboard {
                 get_clipboard_text().ok()
             } else {
@@ -20,14 +20,17 @@ pub fn paste_text(text: &str, method: &PasteMethod, restore_clipboard: bool) -> 
             set_clipboard(text)?;
             // Give the clipboard a moment to settle before simulating keystrokes.
             std::thread::sleep(std::time::Duration::from_millis(80));
-            simulate_ctrl_v()?;
+            if matches!(method, PasteMethod::CtrlShiftV) {
+                simulate_ctrl_shift_v()?;
+            } else {
+                simulate_ctrl_v()?;
+            }
             std::thread::sleep(std::time::Duration::from_millis(120));
 
             if restore_clipboard {
                 if let Some(prev) = saved {
                     let _ = set_clipboard(&prev);
                 } else {
-                    // Clear clipboard so it looks untouched
                     let _ = clear_clipboard();
                 }
             }
@@ -63,6 +66,17 @@ fn simulate_ctrl_v() -> Result<()> {
     let mut enigo = Enigo::new();
     enigo.key_down(Key::Control);
     enigo.key_click(Key::Layout('v'));
+    enigo.key_up(Key::Control);
+    Ok(())
+}
+
+fn simulate_ctrl_shift_v() -> Result<()> {
+    use enigo::{Enigo, Key, KeyboardControllable};
+    let mut enigo = Enigo::new();
+    enigo.key_down(Key::Control);
+    enigo.key_down(Key::Shift);
+    enigo.key_click(Key::Layout('v'));
+    enigo.key_up(Key::Shift);
     enigo.key_up(Key::Control);
     Ok(())
 }

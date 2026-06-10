@@ -8,7 +8,7 @@ use crate::audio_mute::{mute_system_audio, unmute_system_audio};
 use crate::config::{self, Config, RecordingMode};
 use crate::history;
 use crate::hotkey::{start_hotkey_listener, HotkeyEvent};
-use crate::paste::paste_text;
+use crate::paste;
 use crate::transcription::{load_word_list, TranscriptionEngine};
 
 // ---------------------------------------------------------------------------
@@ -167,11 +167,25 @@ impl ActiveRecording {
 // ---------------------------------------------------------------------------
 
 pub fn run_daemon(mut config: Config) -> Result<()> {
+    // Validate: repaste bound to same key as transcribe is only allowed in toggle mode.
+    if !config.hotkeys.repaste.is_empty()
+        && config.hotkeys.repaste.eq_ignore_ascii_case(&config.hotkeys.transcribe)
+        && config.hotkeys.mode == RecordingMode::PushToTalk
+    {
+        anyhow::bail!(
+            "Invalid config: hotkeys.repaste is \"{}\" (same as transcribe) but \
+             hotkeys.mode is push_to_talk — hold is already used for recording. \
+             Use a different repaste key or switch to toggle mode.",
+            config.hotkeys.repaste
+        );
+    }
+
     tracing::info!(
-        "Daemon started — transcribe={} cancel={} mode={:?}",
+        "Daemon started — transcribe={} cancel={} mode={:?} repaste={:?}",
         config.hotkeys.transcribe,
         config.hotkeys.cancel,
         config.hotkeys.mode,
+        config.hotkeys.repaste,
     );
     println!(
         "quoteme daemon running. Press {} to {}, {} to cancel.",
@@ -205,11 +219,21 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
     start_hotkey_listener(
         config.hotkeys.transcribe.clone(),
         config.hotkeys.cancel.clone(),
+        Some(config.hotkeys.repaste.clone()).filter(|s| !s.is_empty()),
         hotkey_tx,
     );
 
     let (transcription_tx, transcription_rx) = std::sync::mpsc::channel::<TranscriptionResult>();
     let mut active: Option<ActiveRecording> = None;
+
+    // Tap-or-hold state: only active when repaste key == transcribe key in toggle mode.
+    let repaste_shares_key = !config.hotkeys.repaste.is_empty()
+        && config.hotkeys.repaste.eq_ignore_ascii_case(&config.hotkeys.transcribe);
+    const HOLD_THRESHOLD: Duration = Duration::from_millis(500);
+    let mut key_down_at: Option<Instant> = None;
+    let mut key_down_was_idle = false; // idle (not recording) when key went down
+    let mut hold_repaste_fired = false;
+    let mut stopped_recording_on_down = false;
 
     loop {
         // ---- Apply pending config reload (written by `quoteme config set`) ----
@@ -289,11 +313,33 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
             handle_done(&config, &text, &audio, duration);
         }
 
+        // ---- Tap-or-hold: fire repaste when transcribe key held past threshold ----
+        if repaste_shares_key && key_down_was_idle && !hold_repaste_fired {
+            if let Some(down_at) = key_down_at {
+                if down_at.elapsed() >= HOLD_THRESHOLD {
+                    hold_repaste_fired = true;
+                    do_repaste(&config);
+                }
+            }
+        }
+
         // ---- Process hotkey events ----
         while let Ok(event) = hotkey_rx.try_recv() {
             match event {
                 HotkeyEvent::TranscribeDown => {
-                    if config.hotkeys.mode == RecordingMode::Toggle {
+                    key_down_at = Some(Instant::now());
+                    key_down_was_idle = active.is_none();
+                    hold_repaste_fired = false;
+
+                    if repaste_shares_key {
+                        // Stop recording on key-down; start recording is deferred to key-up (tap).
+                        if let Some(rec) = &mut active {
+                            rec.signal(RecordSignal::Stop);
+                            stopped_recording_on_down = true;
+                        } else {
+                            stopped_recording_on_down = false;
+                        }
+                    } else if config.hotkeys.mode == RecordingMode::Toggle {
                         if let Some(rec) = &mut active {
                             rec.signal(RecordSignal::Stop);
                         } else {
@@ -307,16 +353,27 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                     }
                 }
                 HotkeyEvent::TranscribeUp => {
-                    if config.hotkeys.mode == RecordingMode::PushToTalk {
+                    if repaste_shares_key && config.hotkeys.mode == RecordingMode::Toggle {
+                        // Tap = start recording; hold = repaste (already fired above).
+                        if !hold_repaste_fired && !stopped_recording_on_down && active.is_none() {
+                            active = spawn_recording(&config);
+                        }
+                        stopped_recording_on_down = false;
+                    } else if config.hotkeys.mode == RecordingMode::PushToTalk {
                         if let Some(rec) = &mut active {
                             rec.signal(RecordSignal::Stop);
                         }
                     }
+                    key_down_at = None;
+                    hold_repaste_fired = false;
                 }
                 HotkeyEvent::Cancel => {
                     if let Some(rec) = &mut active {
                         rec.signal(RecordSignal::Cancel);
                     }
+                }
+                HotkeyEvent::Repaste => {
+                    do_repaste(&config);
                 }
             }
         }
@@ -446,9 +503,28 @@ fn recording_thread(
 
 // ---------------------------------------------------------------------------
 
+fn do_repaste(config: &Config) {
+    match history::list_entries(&config.history) {
+        Ok(entries) => match entries.into_iter().find(|e| !e.text.is_empty()) {
+            Some(entry) => {
+                tracing::info!("Repasting last transcription ({} chars)", entry.text.len());
+                if let Err(e) = paste::paste_text(
+                    &entry.text,
+                    &config.paste.method,
+                    config.paste.restore_clipboard,
+                ) {
+                    tracing::error!("Repaste failed: {:#}", e);
+                }
+            }
+            None => tracing::warn!("Repaste: no non-empty history entry found"),
+        },
+        Err(e) => tracing::error!("Repaste: failed to load history: {:#}", e),
+    }
+}
+
 fn handle_done(config: &Config, text: &str, audio: &[f32], duration: f64) {
     if !text.is_empty() {
-        if let Err(e) = paste_text(text, &config.paste.method, config.paste.restore_clipboard) {
+        if let Err(e) = paste::paste_text(text, &config.paste.method, config.paste.restore_clipboard) {
             eprintln!("Paste failed: {}", e);
         }
         if let Err(e) = history::save_entry(&config.history, text, audio, duration, false) {
