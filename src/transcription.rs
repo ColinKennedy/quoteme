@@ -95,6 +95,13 @@ impl TranscriptionEngine {
             self.ctx = None;
             self.model_path = new_path;
         }
+        if unload_after_secs != self.unload_after_secs {
+            tracing::info!(
+                "unload_after_secs changed ({}s → {}s)",
+                self.unload_after_secs,
+                unload_after_secs,
+            );
+        }
         self.unload_after_secs = unload_after_secs;
     }
 

@@ -55,6 +55,14 @@ impl AudioCapture {
         let channels = supported.channels() as usize;
         let sample_format = supported.sample_format();
 
+        tracing::info!(
+            "Audio capture: device=\"{}\" rate={}Hz channels={} format={:?}",
+            device.name().unwrap_or_else(|_| "unknown".to_string()),
+            native_rate,
+            channels,
+            sample_format,
+        );
+
         let stream_config = StreamConfig {
             channels: supported.channels(),
             sample_rate: supported.sample_rate(),

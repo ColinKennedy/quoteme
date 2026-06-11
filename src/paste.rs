@@ -5,7 +5,9 @@ use crate::config::PasteMethod;
 
 pub fn paste_text(text: &str, method: &PasteMethod, restore_clipboard: bool) -> Result<()> {
     match method {
-        PasteMethod::None => {}
+        PasteMethod::None => {
+            tracing::debug!("Paste skipped (method=none, {} chars)", text.len());
+        }
         PasteMethod::Clipboard => {
             set_clipboard(text)?;
             tracing::info!("Text copied to clipboard ({} chars)", text.len());

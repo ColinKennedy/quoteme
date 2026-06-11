@@ -81,6 +81,9 @@ enum ConfigAction {
     Set {
         key: String,
         value: String,
+        /// Skip validation of the new value (e.g. if the file doesn't exist yet).
+        #[arg(long)]
+        no_validation: bool,
     },
     /// Interactively configure a setting.
     SetInteractive {
@@ -126,10 +129,23 @@ fn main() -> Result<()> {
         Some(Command::Check { action: CheckAction::Health { minimal } }) => {
             cmd_check_health(minimal)?;
         }
-        Some(Command::Config { action: ConfigAction::Set { key, value } }) => {
+        Some(Command::Config { action: ConfigAction::Set { key, value, no_validation } }) => {
             config::set_config_value(&key, &value)?;
             println!("Set {} = {}", key, value);
             println!("Config file: {}", config::config_path().display());
+            if !no_validation && key == "transcription.model_path" {
+                let path_check = health::check_model_path(&value);
+                let path_ok = path_check.is_ok();
+                if !path_ok {
+                    print_check(path_check);
+                }
+                if path_ok {
+                    let size_check = health::check_model_size(&value);
+                    if !size_check.is_ok() {
+                        print_check(size_check);
+                    }
+                }
+            }
         }
         Some(Command::Config { action: ConfigAction::SetInteractive { target: ConfigSetTarget::Microphone } }) => {
             cmd_config_add_microphone()?;
@@ -349,6 +365,7 @@ fn cmd_check_health(minimal: bool) -> Result<()> {
     print_check(model_item);
 
     if model_ok {
+        print_check(health::check_model_size(&cfg.transcription.model_path));
         if !minimal {
             print!("[    ] Model load test: loading… (use --minimal to skip)");
             std::io::Write::flush(&mut std::io::stdout())?;

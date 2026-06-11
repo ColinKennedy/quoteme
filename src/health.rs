@@ -113,6 +113,26 @@ pub fn check_model_path(model_path: &str) -> CheckItem {
     CheckItem::ok(format!("Model path: \"{}\"", model_path))
 }
 
+pub fn check_model_size(model_path: &str) -> CheckItem {
+    let size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+    const GB: u64 = 1_000_000_000;
+    if size >= 2 * GB {
+        CheckItem::warn(format!(
+            "Model size: {:.1} GB — very large; transcription will be slow without a GPU \
+             (consider a smaller model or the quoteme-cuda binary)",
+            size as f64 / GB as f64,
+        ))
+    } else if size >= GB {
+        CheckItem::warn(format!(
+            "Model size: {:.1} GB — large; transcription may be slow on CPU \
+             (consider a smaller model or the quoteme-cuda binary)",
+            size as f64 / GB as f64,
+        ))
+    } else {
+        CheckItem::ok(format!("Model size: {:.0} MB", size as f64 / 1_000_000.0))
+    }
+}
+
 pub fn check_word_list(word_list_path: &str) -> CheckItem {
     if word_list_path.is_empty() {
         return CheckItem::ok("Word list: not configured (optional)");
@@ -225,6 +245,25 @@ mod tests {
         let path = tmp.path().to_str().unwrap().to_string();
         let r = check_model_path(&path);
         assert!(r.is_ok(), "expected ok, got {:?}: {}", r.status, r.message);
+    }
+
+    // --- model size ---
+
+    #[test]
+    fn model_size_sub_gigabyte_is_ok() {
+        let mut tmp = Builder::new().suffix(".bin").tempfile().unwrap();
+        tmp.write_all(&vec![0u8; 1024]).unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        let r = check_model_size(&path);
+        assert!(r.is_ok(), "expected ok, got {:?}: {}", r.status, r.message);
+        assert!(r.message.contains("MB"));
+    }
+
+    #[test]
+    fn model_size_missing_file_is_ok() {
+        // Nonexistent file → metadata fails → size treated as 0 → ok "0 MB"
+        let r = check_model_size("/nonexistent/model.bin");
+        assert!(r.is_ok(), "missing file should not produce a warning, got {:?}", r.status);
     }
 
     #[test]

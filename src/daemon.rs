@@ -181,11 +181,15 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
     }
 
     tracing::info!(
-        "Daemon started — transcribe={} cancel={} mode={:?} repaste={:?}",
+        "Daemon started — transcribe={} cancel={} mode={:?} repaste={:?} \
+         model={:?} paste={:?} silence_timeout={}s",
         config.hotkeys.transcribe,
         config.hotkeys.cancel,
         config.hotkeys.mode,
         config.hotkeys.repaste,
+        config.transcription.model_path,
+        config.paste.method,
+        config.recording.silence_timeout_secs,
     );
     println!(
         "quoteme daemon running. Press {} to {}, {} to cancel.",
@@ -261,10 +265,41 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                         }
                         word_list = load_word_list(&new_cfg.transcription.word_list_path)
                             .unwrap_or_default();
-                        tracing::info!(
-                            "Config reloaded — model={:?}",
-                            new_cfg.transcription.model_path
-                        );
+
+                        // Log every field that actually changed.
+                        macro_rules! log_change {
+                            ($key:expr, $old:expr, $new:expr) => {
+                                if $old != $new {
+                                    tracing::info!(
+                                        "Config changed: {} {:?} → {:?}",
+                                        $key, $old, $new
+                                    );
+                                }
+                            };
+                        }
+                        log_change!("transcription.language",
+                            &config.transcription.language, &new_cfg.transcription.language);
+                        log_change!("transcription.word_list_path",
+                            &config.transcription.word_list_path, &new_cfg.transcription.word_list_path);
+                        log_change!("transcription.unload_after_secs",
+                            config.transcription.unload_after_secs, new_cfg.transcription.unload_after_secs);
+                        log_change!("recording.device",
+                            &config.recording.device, &new_cfg.recording.device);
+                        log_change!("recording.mute_system_audio",
+                            config.recording.mute_system_audio, new_cfg.recording.mute_system_audio);
+                        log_change!("recording.silence_timeout_secs",
+                            config.recording.silence_timeout_secs, new_cfg.recording.silence_timeout_secs);
+                        log_change!("paste.method",
+                            &config.paste.method, &new_cfg.paste.method);
+                        log_change!("paste.restore_clipboard",
+                            config.paste.restore_clipboard, new_cfg.paste.restore_clipboard);
+                        log_change!("history.max_recordings",
+                            config.history.max_recordings, new_cfg.history.max_recordings);
+                        log_change!("history.max_age_days",
+                            config.history.max_age_days, new_cfg.history.max_age_days);
+                        log_change!("history.save_cancelled",
+                            config.history.save_cancelled, new_cfg.history.save_cancelled);
+                        tracing::info!("Config reloaded");
                         config = new_cfg;
                     }
                     Err(e) => tracing::warn!("Failed to reload config: {:#}", e),
@@ -327,6 +362,7 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
         while let Ok(event) = hotkey_rx.try_recv() {
             match event {
                 HotkeyEvent::TranscribeDown => {
+                    tracing::debug!("Hotkey: TranscribeDown (recording={})", active.is_some());
                     key_down_at = Some(Instant::now());
                     key_down_was_idle = active.is_none();
                     hold_repaste_fired = false;
@@ -353,6 +389,7 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                     }
                 }
                 HotkeyEvent::TranscribeUp => {
+                    tracing::debug!("Hotkey: TranscribeUp");
                     if repaste_shares_key && config.hotkeys.mode == RecordingMode::Toggle {
                         // Tap = start recording; hold = repaste (already fired above).
                         if !hold_repaste_fired && !stopped_recording_on_down && active.is_none() {
@@ -368,11 +405,13 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                     hold_repaste_fired = false;
                 }
                 HotkeyEvent::Cancel => {
+                    tracing::debug!("Hotkey: Cancel (recording={})", active.is_some());
                     if let Some(rec) = &mut active {
                         rec.signal(RecordSignal::Cancel);
                     }
                 }
                 HotkeyEvent::Repaste => {
+                    tracing::debug!("Hotkey: Repaste");
                     do_repaste(&config);
                 }
             }
@@ -567,6 +606,12 @@ fn handle_done(config: &Config, text: &str, audio: &[f32], duration: f64) {
         if let Err(e) = history::save_entry(&config.history, text, audio, duration, false) {
             tracing::warn!("Failed to save history: {}", e);
         }
+    } else {
+        tracing::warn!(
+            "Transcription returned empty result for {:.1}s of audio — \
+             check model path, audio level, and that the correct language is set",
+            duration
+        );
     }
     let _ = history::cleanup(&config.history);
 }
