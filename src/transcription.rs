@@ -204,3 +204,124 @@ pub fn load_word_list(path: &str) -> Result<String> {
         .collect();
     Ok(words.join(", "))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // ---- TranscriptionEngine state ----
+
+    #[test]
+    fn engine_starts_unloaded_and_should_not_unload() {
+        let engine = TranscriptionEngine::new("/fake/model.bin".to_string(), 300);
+        // Not loaded yet, so should_unload must be false regardless of timeout.
+        assert!(!engine.should_unload());
+    }
+
+    #[test]
+    fn should_unload_false_when_disabled() {
+        let engine = TranscriptionEngine::new("/fake/model.bin".to_string(), 0);
+        assert!(!engine.should_unload(), "unload_after_secs=0 means never unload");
+    }
+
+    #[test]
+    fn load_fails_on_empty_model_path() {
+        let mut engine = TranscriptionEngine::new("".to_string(), 300);
+        let err = engine.load().unwrap_err();
+        assert!(
+            err.to_string().contains("No model path"),
+            "expected 'No model path' in error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn load_fails_on_nonexistent_model_path() {
+        let mut engine =
+            TranscriptionEngine::new("/absolutely/nonexistent/model.bin".to_string(), 300);
+        let err = engine.load().unwrap_err();
+        // Error must mention the missing path.
+        assert!(
+            err.to_string().contains("nonexistent") || err.to_string().contains("not found"),
+            "error should mention the missing path, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn update_model_changes_path_for_next_load() {
+        let mut engine = TranscriptionEngine::new("/path/A".to_string(), 300);
+        engine.update_model("/path/B".to_string(), 300);
+        // Load should fail referencing /path/B (not A).
+        let err = engine.load().unwrap_err();
+        assert!(
+            err.to_string().contains("/path/B") || err.to_string().contains("path/B"),
+            "error should reference updated path, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn update_model_same_path_does_not_error() {
+        let mut engine = TranscriptionEngine::new("/path/A".to_string(), 300);
+        // Updating with the same path should not panic.
+        engine.update_model("/path/A".to_string(), 60);
+        // Still fails on load (file doesn't exist), but path is the same.
+        let err = engine.load().unwrap_err();
+        assert!(err.to_string().contains("/path/A"));
+    }
+
+    // ---- load_word_list ----
+
+    #[test]
+    fn word_list_empty_path_returns_empty() {
+        assert_eq!(load_word_list("").unwrap(), "");
+    }
+
+    #[test]
+    fn word_list_nonexistent_path_returns_empty() {
+        // Missing file is non-fatal (logged as warning only).
+        assert_eq!(load_word_list("/no/such/words.txt").unwrap(), "");
+    }
+
+    #[test]
+    fn word_list_newline_separated_lines() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("words.txt");
+        std::fs::write(&path, "hello\nworld\nrust").unwrap();
+        assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "hello, world, rust");
+    }
+
+    #[test]
+    fn word_list_csv_format_splits_commas() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("words.txt");
+        std::fs::write(&path, "foo, bar,baz\nqux").unwrap();
+        assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "foo, bar, baz, qux");
+    }
+
+    #[test]
+    fn word_list_trims_whitespace() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("words.txt");
+        std::fs::write(&path, "  hello  \n  world  ").unwrap();
+        assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "hello, world");
+    }
+
+    #[test]
+    fn word_list_filters_empty_lines() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("words.txt");
+        std::fs::write(&path, "hello\n\nworld\n\n").unwrap();
+        assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "hello, world");
+    }
+
+    #[test]
+    fn word_list_single_word() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("words.txt");
+        std::fs::write(&path, "Anthropic").unwrap();
+        assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "Anthropic");
+    }
+}

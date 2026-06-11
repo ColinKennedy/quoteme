@@ -170,8 +170,85 @@ pub fn check_history_dir(dir: &Path) -> CheckItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{HotkeysConfig, RecordingMode};
     use std::io::Write;
     use tempfile::Builder;
+
+    // --- hotkeys ---
+
+    // --- repaste hotkey ---
+
+    #[test]
+    fn repaste_empty_is_info() {
+        let hotkeys = HotkeysConfig::default(); // repaste = ""
+        let r = check_repaste_hotkey(&hotkeys);
+        assert!(matches!(r.status, Status::Info));
+        assert!(r.message.contains("optional"));
+    }
+
+    #[test]
+    fn repaste_same_as_cancel_is_fail() {
+        let hotkeys = HotkeysConfig {
+            transcribe: "RAlt".to_string(),
+            cancel: "Escape".to_string(),
+            repaste: "Escape".to_string(),
+            mode: RecordingMode::Toggle,
+        };
+        let r = check_repaste_hotkey(&hotkeys);
+        assert!(matches!(r.status, Status::Fail));
+        assert!(r.message.contains("conflict"));
+    }
+
+    #[test]
+    fn repaste_same_as_cancel_conflict_case_insensitive() {
+        let hotkeys = HotkeysConfig {
+            transcribe: "RAlt".to_string(),
+            cancel: "escape".to_string(),
+            repaste: "ESCAPE".to_string(),
+            mode: RecordingMode::Toggle,
+        };
+        let r = check_repaste_hotkey(&hotkeys);
+        assert!(matches!(r.status, Status::Fail));
+    }
+
+    #[test]
+    fn repaste_same_as_transcribe_push_to_talk_is_fail() {
+        let hotkeys = HotkeysConfig {
+            transcribe: "RAlt".to_string(),
+            cancel: "Escape".to_string(),
+            repaste: "RAlt".to_string(),
+            mode: RecordingMode::PushToTalk,
+        };
+        let r = check_repaste_hotkey(&hotkeys);
+        assert!(matches!(r.status, Status::Fail));
+        assert!(r.message.contains("push_to_talk"));
+    }
+
+    #[test]
+    fn repaste_same_as_transcribe_toggle_is_ok() {
+        let hotkeys = HotkeysConfig {
+            transcribe: "RAlt".to_string(),
+            cancel: "Escape".to_string(),
+            repaste: "RAlt".to_string(),
+            mode: RecordingMode::Toggle,
+        };
+        let r = check_repaste_hotkey(&hotkeys);
+        assert!(r.is_ok(), "same key in toggle mode should be OK (tap/hold)");
+        assert!(r.message.contains("tap to record"));
+    }
+
+    #[test]
+    fn repaste_different_key_is_ok() {
+        let hotkeys = HotkeysConfig {
+            transcribe: "RAlt".to_string(),
+            cancel: "Escape".to_string(),
+            repaste: "F9".to_string(),
+            mode: RecordingMode::Toggle,
+        };
+        let r = check_repaste_hotkey(&hotkeys);
+        assert!(r.is_ok());
+        assert!(r.message.contains("F9"));
+    }
 
     // --- hotkeys ---
 

@@ -102,3 +102,132 @@ pub fn start_hotkey_listener(
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdev::Key;
+
+    // ---- canonical key names ----
+
+    #[test]
+    fn parse_ralt() { assert_eq!(parse_key("RAlt").unwrap(), Key::AltGr); }
+
+    #[test]
+    fn parse_lalt() { assert_eq!(parse_key("LAlt").unwrap(), Key::Alt); }
+
+    #[test]
+    fn parse_rctrl() { assert_eq!(parse_key("RCtrl").unwrap(), Key::ControlRight); }
+
+    #[test]
+    fn parse_lctrl() { assert_eq!(parse_key("LCtrl").unwrap(), Key::ControlLeft); }
+
+    #[test]
+    fn parse_rshift() { assert_eq!(parse_key("RShift").unwrap(), Key::ShiftRight); }
+
+    #[test]
+    fn parse_lshift() { assert_eq!(parse_key("LShift").unwrap(), Key::ShiftLeft); }
+
+    #[test]
+    fn parse_escape() { assert_eq!(parse_key("Escape").unwrap(), Key::Escape); }
+
+    #[test]
+    fn parse_space() { assert_eq!(parse_key("Space").unwrap(), Key::Space); }
+
+    #[test]
+    fn parse_tab() { assert_eq!(parse_key("Tab").unwrap(), Key::Tab); }
+
+    #[test]
+    fn parse_return() { assert_eq!(parse_key("Return").unwrap(), Key::Return); }
+
+    // ---- aliases ----
+
+    #[test]
+    fn parse_ralt_aliases() {
+        assert_eq!(parse_key("right_alt").unwrap(), Key::AltGr);
+        assert_eq!(parse_key("altgr").unwrap(), Key::AltGr);
+    }
+
+    #[test]
+    fn parse_lalt_aliases() {
+        assert_eq!(parse_key("alt").unwrap(), Key::Alt);
+        assert_eq!(parse_key("left_alt").unwrap(), Key::Alt);
+    }
+
+    #[test]
+    fn parse_ctrl_aliases() {
+        assert_eq!(parse_key("right_ctrl").unwrap(), Key::ControlRight);
+        assert_eq!(parse_key("right_control").unwrap(), Key::ControlRight);
+        assert_eq!(parse_key("ctrl").unwrap(), Key::ControlLeft);
+        assert_eq!(parse_key("control").unwrap(), Key::ControlLeft);
+        assert_eq!(parse_key("left_control").unwrap(), Key::ControlLeft);
+    }
+
+    #[test]
+    fn parse_shift_aliases() {
+        assert_eq!(parse_key("right_shift").unwrap(), Key::ShiftRight);
+        assert_eq!(parse_key("shift").unwrap(), Key::ShiftLeft);
+        assert_eq!(parse_key("left_shift").unwrap(), Key::ShiftLeft);
+    }
+
+    #[test]
+    fn parse_enter_alias() {
+        assert_eq!(parse_key("Enter").unwrap(), Key::Return);
+    }
+
+    #[test]
+    fn parse_esc_alias() {
+        assert_eq!(parse_key("esc").unwrap(), Key::Escape);
+    }
+
+    // ---- F-keys ----
+
+    #[test]
+    fn parse_all_f_keys() {
+        let expected = [
+            Key::F1, Key::F2, Key::F3, Key::F4, Key::F5, Key::F6,
+            Key::F7, Key::F8, Key::F9, Key::F10, Key::F11, Key::F12,
+        ];
+        for (i, expected_key) in expected.iter().enumerate() {
+            let name = format!("F{}", i + 1);
+            assert_eq!(
+                parse_key(&name).unwrap(),
+                *expected_key,
+                "{} should parse correctly",
+                name
+            );
+        }
+    }
+
+    // ---- case insensitivity ----
+
+    #[test]
+    fn parse_key_case_insensitive() {
+        assert_eq!(parse_key("ralt").unwrap(), Key::AltGr);
+        assert_eq!(parse_key("RALT").unwrap(), Key::AltGr);
+        assert_eq!(parse_key("Ralt").unwrap(), Key::AltGr);
+        assert_eq!(parse_key("ESCAPE").unwrap(), Key::Escape);
+        assert_eq!(parse_key("f9").unwrap(), Key::F9);
+    }
+
+    // ---- unknown key ----
+
+    #[test]
+    fn parse_key_unknown_errors() {
+        assert!(parse_key("UnknownKey").is_err());
+        assert!(parse_key("A").is_err());
+        assert!(parse_key("").is_err());
+        assert!(parse_key("Ctrl+Alt+Del").is_err());
+    }
+
+    #[test]
+    fn parse_key_error_message_mentions_key() {
+        let err = parse_key("BadKey").unwrap_err();
+        // parse_key lowercases the input before matching, so the error contains "badkey".
+        assert!(
+            err.to_string().contains("badkey") || err.to_string().contains("Unknown key"),
+            "error should identify the unrecognised key, got: {}",
+            err
+        );
+    }
+}

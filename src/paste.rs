@@ -82,3 +82,15 @@ fn simulate_ctrl_shift_v() -> Result<()> {
     enigo.key_up(Key::Control);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_none_method_is_noop() {
+        // PasteMethod::None must succeed without touching the clipboard or keyboard.
+        assert!(paste_text("hello world", &PasteMethod::None, false).is_ok());
+        assert!(paste_text("", &PasteMethod::None, true).is_ok());
+    }
+}

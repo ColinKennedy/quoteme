@@ -86,3 +86,86 @@ pub fn filter_silence(audio: &[f32]) -> Vec<f32> {
 
     speech_out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build audio from (amplitude, frame_count) pairs.
+    fn build_audio(segments: &[(f32, usize)]) -> Vec<f32> {
+        segments
+            .iter()
+            .flat_map(|&(amp, n)| vec![amp; n * FRAME_SAMPLES])
+            .collect()
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert!(filter_silence(&[]).is_empty());
+    }
+
+    #[test]
+    fn all_silence_falls_through_unchanged() {
+        // Amplitude well below MIN_THRESHOLD (0.002) so no speech is detected.
+        let audio = build_audio(&[(0.0001, 32)]);
+        let result = filter_silence(&audio);
+        assert_eq!(result.len(), audio.len(), "all-silence audio must pass through unchanged");
+        assert_eq!(result[0], 0.0001_f32);
+    }
+
+    #[test]
+    fn speech_frames_are_stripped_to_correct_length() {
+        // 20 quiet frames (noise estimation + headroom) → 3 loud speech frames → 20 quiet frames.
+        // Noise RMS ≈ 0.0001; threshold = max(4×0.0001, 0.002) = 0.002.
+        // Speech RMS = 0.5 >> 0.002 → kept.
+        // Expected output: PREFILL_FRAMES + 3 speech + HANGOVER_FRAMES.
+        let audio = build_audio(&[(0.0001, 20), (0.5, 3), (0.0001, 20)]);
+        let result = filter_silence(&audio);
+        let expected = (PREFILL_FRAMES + 3 + HANGOVER_FRAMES) * FRAME_SAMPLES;
+        assert_eq!(result.len(), expected, "VAD should keep prefill + speech + hangover");
+        assert!(result.len() < audio.len(), "VAD must strip silent regions");
+    }
+
+    #[test]
+    fn prefill_frames_precede_speech() {
+        // The PREFILL_FRAMES quiet frames before speech onset must appear at the start of output.
+        let audio = build_audio(&[(0.0001, 20), (0.5, 3), (0.0001, 20)]);
+        let result = filter_silence(&audio);
+        // First PREFILL_FRAMES frames must be quiet (amplitude 0.0001).
+        for &s in &result[..PREFILL_FRAMES * FRAME_SAMPLES] {
+            assert_eq!(s, 0.0001_f32, "prefill samples must be from the silent region");
+        }
+    }
+
+    #[test]
+    fn hangover_tail_follows_last_speech_frame() {
+        // The last HANGOVER_FRAMES frames must be the quiet hangover, not speech.
+        let audio = build_audio(&[(0.0001, 20), (0.5, 3), (0.0001, 20)]);
+        let result = filter_silence(&audio);
+        let hangover_start = result.len() - HANGOVER_FRAMES * FRAME_SAMPLES;
+        for &s in &result[hangover_start..] {
+            assert_eq!(s, 0.0001_f32, "hangover samples must come from the silent tail");
+        }
+    }
+
+    #[test]
+    fn two_speech_bursts_separated_by_long_silence() {
+        // Two speech bursts separated by >HANGOVER_FRAMES of silence — second burst is
+        // also captured (with its own prefill from the gap).
+        let silence = 0.0001_f32;
+        let loud = 0.5_f32;
+        let gap = HANGOVER_FRAMES + PREFILL_FRAMES + 5; // long enough to end hangover
+        let audio = build_audio(&[
+            (silence, 20),
+            (loud, 2),
+            (silence, gap),
+            (loud, 2),
+            (silence, 20),
+        ]);
+        let result = filter_silence(&audio);
+        // Two bursts → both should be in output; result must be shorter than original.
+        assert!(result.len() < audio.len());
+        // Result must be non-empty.
+        assert!(!result.is_empty());
+    }
+}

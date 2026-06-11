@@ -541,4 +541,65 @@ mod tests {
         let err = set_config_value_at(&path, "nonexistent.key", "value").unwrap_err();
         assert!(err.to_string().contains("Unknown config key"));
     }
+
+    #[test]
+    fn set_value_unknown_key_lists_valid_keys() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let err = set_config_value_at(&path, "bad.key", "value").unwrap_err();
+        // Error message must enumerate valid keys so user knows what to use.
+        assert!(err.to_string().contains("hotkeys.transcribe"));
+        assert!(err.to_string().contains("transcription.model_path"));
+    }
+
+    #[test]
+    fn set_value_silence_timeout_zero_errors() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let err = set_config_value_at(&path, "recording.silence_timeout_secs", "0").unwrap_err();
+        assert!(err.to_string().contains("at least 1"));
+    }
+
+    #[test]
+    fn set_value_silence_timeout_valid() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        set_config_value_at(&path, "recording.silence_timeout_secs", "5").unwrap();
+        let cfg = load_config_from_path(&path).unwrap();
+        assert_eq!(cfg.recording.silence_timeout_secs, 5);
+    }
+
+    #[test]
+    fn set_value_remaining_string_keys() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        set_config_value_at(&path, "hotkeys.repaste", "F9").unwrap();
+        set_config_value_at(&path, "recording.device", "Blue Yeti").unwrap();
+        set_config_value_at(&path, "transcription.language", "fr").unwrap();
+        set_config_value_at(&path, "transcription.word_list_path", "/tmp/words.txt").unwrap();
+        set_config_value_at(&path, "history.path", "/tmp/hist").unwrap();
+        let cfg = load_config_from_path(&path).unwrap();
+        assert_eq!(cfg.hotkeys.repaste, "F9");
+        assert_eq!(cfg.recording.device, "Blue Yeti");
+        assert_eq!(cfg.transcription.language, "fr");
+        assert_eq!(cfg.transcription.word_list_path, "/tmp/words.txt");
+        assert_eq!(cfg.history.path, "/tmp/hist");
+    }
+
+    #[test]
+    fn set_value_transcription_model_path() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        set_config_value_at(&path, "transcription.model_path", "/models/ggml-medium.bin").unwrap();
+        let cfg = load_config_from_path(&path).unwrap();
+        assert_eq!(cfg.transcription.model_path, "/models/ggml-medium.bin");
+    }
+
+    #[test]
+    fn set_value_silence_timeout_non_numeric_errors() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let err = set_config_value_at(&path, "recording.silence_timeout_secs", "never").unwrap_err();
+        assert!(err.to_string().contains("positive number") || err.to_string().contains("number"));
+    }
 }

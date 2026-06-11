@@ -181,3 +181,97 @@ pub fn save_wav(path: &std::path::Path, samples: &[f32], sample_rate: u32) -> Re
     writer.finalize()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // ---- resample_linear ----
+
+    #[test]
+    fn resample_same_rate_returns_identical() {
+        let input = vec![0.1_f32, 0.2, 0.3, 0.4];
+        assert_eq!(resample_linear(&input, 16000, 16000), input);
+    }
+
+    #[test]
+    fn resample_empty_input_returns_empty() {
+        assert!(resample_linear(&[], 48000, 16000).is_empty());
+    }
+
+    #[test]
+    fn resample_upsample_output_length() {
+        // 8000 Hz → 16000 Hz: ratio = 0.5, output_len = input_len / 0.5
+        let input: Vec<f32> = (0..16).map(|i| i as f32 / 16.0).collect();
+        let output = resample_linear(&input, 8000, 16000);
+        assert_eq!(output.len(), 32);
+    }
+
+    #[test]
+    fn resample_downsample_output_length() {
+        // 48000 Hz → 16000 Hz: ratio = 3.0, output_len = input_len / 3.0
+        let input: Vec<f32> = (0..48).map(|i| i as f32 / 48.0).collect();
+        let output = resample_linear(&input, 48000, 16000);
+        assert_eq!(output.len(), 16);
+    }
+
+    #[test]
+    fn resample_dc_signal_preserved() {
+        // A constant (DC) signal must remain constant after resampling.
+        let input = vec![0.5_f32; 100];
+        let output = resample_linear(&input, 48000, 16000);
+        for &s in &output {
+            assert!(
+                (s - 0.5).abs() < 1e-5,
+                "DC value should be preserved after resampling, got {}",
+                s
+            );
+        }
+    }
+
+    // ---- save_wav ----
+
+    #[test]
+    fn save_wav_creates_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.wav");
+        save_wav(&path, &[0.1_f32, 0.5, -0.5, 0.0], WHISPER_SAMPLE_RATE).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn save_wav_round_trip_preserves_samples() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.wav");
+        let samples = vec![0.1_f32, 0.5, -0.5, 0.0, -0.1];
+        save_wav(&path, &samples, WHISPER_SAMPLE_RATE).unwrap();
+
+        let mut reader = hound::WavReader::open(&path).unwrap();
+        let spec = reader.spec();
+        assert_eq!(spec.sample_rate, WHISPER_SAMPLE_RATE);
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.bits_per_sample, 32);
+
+        let read_back: Vec<f32> =
+            reader.samples::<f32>().map(|s| s.unwrap()).collect();
+        assert_eq!(read_back.len(), samples.len());
+        for (expected, actual) in samples.iter().zip(read_back.iter()) {
+            assert!(
+                (expected - actual).abs() < 1e-6,
+                "sample mismatch: expected {}, got {}",
+                expected,
+                actual
+            );
+        }
+    }
+
+    #[test]
+    fn save_wav_empty_samples_creates_valid_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.wav");
+        save_wav(&path, &[], WHISPER_SAMPLE_RATE).unwrap();
+        let reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.len(), 0);
+    }
+}

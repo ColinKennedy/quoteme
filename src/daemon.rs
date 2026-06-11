@@ -632,6 +632,87 @@ fn handle_cancelled(config: &Config, audio: &[f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{HistoryConfig, PasteConfig, PasteMethod};
+
+    /// Config wired to a temp directory with paste=None so tests don't touch the clipboard.
+    fn test_config(tmp: &tempfile::TempDir) -> Config {
+        Config {
+            paste: PasteConfig { method: PasteMethod::None, restore_clipboard: false },
+            history: HistoryConfig {
+                path: tmp.path().to_str().unwrap().to_string(),
+                ..HistoryConfig::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    // ---- handle_done ----
+
+    #[test]
+    fn handle_done_empty_text_does_not_save_history() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(&tmp);
+        handle_done(&cfg, "", &[], 1.0);
+        assert!(crate::history::list_entries(&cfg.history).unwrap().is_empty());
+    }
+
+    #[test]
+    fn handle_done_nonempty_text_saves_history_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(&tmp);
+        handle_done(&cfg, "hello world", &[0.1_f32, 0.2], 1.5);
+        let entries = crate::history::list_entries(&cfg.history).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "hello world");
+        assert!((entries[0].duration_secs - 1.5).abs() < 1e-6);
+        assert!(!entries[0].cancelled);
+    }
+
+    #[test]
+    fn handle_done_respects_max_recordings_cleanup() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut cfg = test_config(&tmp);
+        cfg.history.max_recordings = 2;
+
+        for i in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            handle_done(&cfg, &format!("text {}", i), &[], 1.0);
+        }
+        let entries = crate::history::list_entries(&cfg.history).unwrap();
+        assert_eq!(entries.len(), 2, "cleanup after handle_done should cap at max_recordings");
+    }
+
+    // ---- handle_cancelled ----
+
+    #[test]
+    fn handle_cancelled_save_false_does_not_save() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut cfg = test_config(&tmp);
+        cfg.history.save_cancelled = false;
+        handle_cancelled(&cfg, &[0.1_f32, 0.2]);
+        assert!(crate::history::list_entries(&cfg.history).unwrap().is_empty());
+    }
+
+    #[test]
+    fn handle_cancelled_save_true_saves_cancelled_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut cfg = test_config(&tmp);
+        cfg.history.save_cancelled = true;
+        handle_cancelled(&cfg, &[0.1_f32, 0.2]);
+        let entries = crate::history::list_entries(&cfg.history).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].cancelled);
+        assert_eq!(entries[0].text, "");
+    }
+
+    #[test]
+    fn handle_cancelled_save_true_but_empty_audio_does_not_save() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut cfg = test_config(&tmp);
+        cfg.history.save_cancelled = true;
+        handle_cancelled(&cfg, &[]); // empty audio → guard in handle_cancelled
+        assert!(crate::history::list_entries(&cfg.history).unwrap().is_empty());
+    }
 
     fn make_active() -> (ActiveRecording, std::sync::mpsc::Sender<RecordResult>) {
         let (stop_tx, _stop_rx) = std::sync::mpsc::sync_channel::<RecordSignal>(1);
