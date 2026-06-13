@@ -61,7 +61,7 @@ A recording is represented by `ActiveRecording`, which wraps a `SyncSender<Recor
 
 ### Configuration (`src/config.rs`)
 
-Config lives at `%APPDATA%\quoteme\config.toml` by default; override with `QUOTEME_CONFIGURATION_FILE`. All fields have sane defaults so the file is optional. `quoteme config <key> <value>` writes individual keys using a flat dotted-path notation (`hotkeys.transcribe`, `recording.device`, etc.).
+Config lives at `%APPDATA%\quoteme\config.toml` by default; override with `QUOTEME_CONFIGURATION_FILE`. All fields have sane defaults so the file is optional. `quoteme configuration set <key> <value>` writes individual keys using a flat dotted-path notation (`hotkeys.transcribe`, `recording.device`, etc.). `quoteme configuration edit` opens the config file in `$VISUAL` or `$EDITOR`; use `--run-with <cmd>` to specify a custom editor.
 
 ### History (`src/history.rs`)
 

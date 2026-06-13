@@ -36,7 +36,7 @@ enum Command {
         action: CheckAction,
     },
     /// Configure quoteme settings.
-    Config {
+    Configuration {
         #[command(subcommand)]
         action: ConfigAction,
     },
@@ -77,7 +77,7 @@ enum CheckAction {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// Set a config value: quoteme config set <key> <value>
+    /// Set a config value: quoteme configuration set <key> <value>
     Set {
         key: String,
         value: String,
@@ -89,6 +89,12 @@ enum ConfigAction {
     SetInteractive {
         #[command(subcommand)]
         target: ConfigSetTarget,
+    },
+    /// Open the config file in an editor (uses $VISUAL, then $EDITOR, or --run-with).
+    Edit {
+        /// Command to open the editor, e.g. "nvim --some-flag". The config path is appended.
+        #[arg(long, value_name = "CMD")]
+        run_with: Option<String>,
     },
 }
 
@@ -129,7 +135,7 @@ fn main() -> Result<()> {
         Some(Command::Check { action: CheckAction::Health { minimal } }) => {
             cmd_check_health(minimal)?;
         }
-        Some(Command::Config { action: ConfigAction::Set { key, value, no_validation } }) => {
+        Some(Command::Configuration { action: ConfigAction::Set { key, value, no_validation } }) => {
             config::set_config_value(&key, &value)?;
             println!("Set {} = {}", key, value);
             println!("Config file: {}", config::config_path().display());
@@ -147,8 +153,11 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Some(Command::Config { action: ConfigAction::SetInteractive { target: ConfigSetTarget::Microphone } }) => {
+        Some(Command::Configuration { action: ConfigAction::SetInteractive { target: ConfigSetTarget::Microphone } }) => {
             cmd_config_add_microphone()?;
+        }
+        Some(Command::Configuration { action: ConfigAction::Edit { run_with } }) => {
+            cmd_configuration_edit(run_with)?;
         }
     }
 
@@ -219,8 +228,8 @@ fn cmd_list_microphone() -> Result<()> {
         println!("  {}. {}{}", i + 1, name, tag);
     }
     println!();
-    println!("To set a microphone: quoteme config set-interactive microphone");
-    println!("To set manually:     quoteme config set recording.device \"<name or substring>\"");
+    println!("To set a microphone: quoteme configuration set-interactive microphone");
+    println!("To set manually:     quoteme configuration set recording.device \"<name or substring>\"");
     Ok(())
 }
 
@@ -279,6 +288,48 @@ fn cmd_config_add_microphone() -> Result<()> {
         println!("Set recording.device = \"{}\"", device_value);
     }
     println!("Config file: {}", config::config_path().display());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// configuration edit
+// ---------------------------------------------------------------------------
+
+fn cmd_configuration_edit(run_with: Option<String>) -> Result<()> {
+    let config_path = config::config_path();
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if !config_path.exists() {
+        std::fs::write(&config_path, "")?;
+    }
+
+    let editor_cmd = if let Some(cmd) = run_with {
+        cmd
+    } else if let Ok(v) = std::env::var("VISUAL") {
+        v
+    } else if let Ok(e) = std::env::var("EDITOR") {
+        e
+    } else {
+        anyhow::bail!(
+            "No editor configured. Set $VISUAL or $EDITOR, or use --run-with \"<command>\"."
+        );
+    };
+
+    let mut parts = editor_cmd.split_whitespace();
+    let program = parts.next().context("Editor command is empty")?;
+    let args: Vec<&str> = parts.collect();
+
+    let status = std::process::Command::new(program)
+        .args(&args)
+        .arg(&config_path)
+        .status()
+        .with_context(|| format!("Failed to launch editor: {}", program))?;
+
+    if !status.success() {
+        anyhow::bail!("Editor exited with non-zero status: {}", status);
+    }
+
     Ok(())
 }
 
