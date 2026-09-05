@@ -56,8 +56,8 @@ impl TranscriptionEngine {
         );
 
         let t = Instant::now();
-        let ctx = WhisperContext::new_with_params(&self.model_path, ctx_params)
-            .with_context(|| {
+        let ctx =
+            WhisperContext::new_with_params(&self.model_path, ctx_params).with_context(|| {
                 format!(
                     "Failed to load Whisper model from \"{}\". \
                      whisper.cpp requires a GGML/GGUF .bin file — not .safetensors or .pt. \
@@ -135,8 +135,13 @@ impl TranscriptionEngine {
         let ctx = self.ctx.as_ref().unwrap();
         tracing::debug!("Creating Whisper state…");
         let state_start = Instant::now();
-        let mut state = ctx.create_state().context("Failed to create Whisper state")?;
-        tracing::debug!("State created in {:.3}s", state_start.elapsed().as_secs_f64());
+        let mut state = ctx
+            .create_state()
+            .context("Failed to create Whisper state")?;
+        tracing::debug!(
+            "State created in {:.3}s",
+            state_start.elapsed().as_secs_f64()
+        );
 
         let lang_owned = language.to_string();
         let prompt_owned = initial_prompt.unwrap_or("").to_string();
@@ -155,7 +160,9 @@ impl TranscriptionEngine {
 
         tracing::info!("Running Whisper inference on {:.2}s of audio…", audio_secs);
         let inference_start = Instant::now();
-        state.full(params, audio).context("Whisper transcription failed")?;
+        state
+            .full(params, audio)
+            .context("Whisper transcription failed")?;
         let inference_secs = inference_start.elapsed().as_secs_f64();
         let rtf = inference_secs / audio_secs.max(0.001);
         tracing::info!(
@@ -163,10 +170,16 @@ impl TranscriptionEngine {
             inference_secs,
             audio_secs,
             rtf,
-            if rtf > 2.0 { " — consider a smaller model or enabling CUDA" } else { "" },
+            if rtf > 2.0 {
+                " — consider a smaller model or enabling CUDA"
+            } else {
+                ""
+            },
         );
 
-        let n = state.full_n_segments().context("Failed to get segment count")?;
+        let n = state
+            .full_n_segments()
+            .context("Failed to get segment count")?;
         tracing::debug!("Collecting {} segment(s)…", n);
         let mut text = String::new();
         for i in 0..n {
@@ -222,7 +235,10 @@ mod tests {
     #[test]
     fn should_unload_false_when_disabled() {
         let engine = TranscriptionEngine::new("/fake/model.bin".to_string(), 0);
-        assert!(!engine.should_unload(), "unload_after_secs=0 means never unload");
+        assert!(
+            !engine.should_unload(),
+            "unload_after_secs=0 means never unload"
+        );
     }
 
     #[test]
@@ -290,7 +306,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("words.txt");
         std::fs::write(&path, "hello\nworld\nrust").unwrap();
-        assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "hello, world, rust");
+        assert_eq!(
+            load_word_list(path.to_str().unwrap()).unwrap(),
+            "hello, world, rust"
+        );
     }
 
     #[test]
@@ -298,7 +317,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("words.txt");
         std::fs::write(&path, "foo, bar,baz\nqux").unwrap();
-        assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "foo, bar, baz, qux");
+        assert_eq!(
+            load_word_list(path.to_str().unwrap()).unwrap(),
+            "foo, bar, baz, qux"
+        );
     }
 
     #[test]
@@ -306,7 +328,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("words.txt");
         std::fs::write(&path, "  hello  \n  world  ").unwrap();
-        assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "hello, world");
+        assert_eq!(
+            load_word_list(path.to_str().unwrap()).unwrap(),
+            "hello, world"
+        );
     }
 
     #[test]
@@ -314,7 +339,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("words.txt");
         std::fs::write(&path, "hello\n\nworld\n\n").unwrap();
-        assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "hello, world");
+        assert_eq!(
+            load_word_list(path.to_str().unwrap()).unwrap(),
+            "hello, world"
+        );
     }
 
     #[test]

@@ -143,7 +143,11 @@ enum RecordResult {
 
 /// Sent by the transcription thread when Whisper inference completes.
 enum TranscriptionResult {
-    Done { text: String, audio: Vec<f32>, duration: f64 },
+    Done {
+        text: String,
+        audio: Vec<f32>,
+        duration: f64,
+    },
 }
 
 struct ActiveRecording {
@@ -169,7 +173,10 @@ impl ActiveRecording {
 pub fn run_daemon(mut config: Config) -> Result<()> {
     // Validate: repaste bound to same key as transcribe is only allowed in toggle mode.
     if !config.hotkeys.repaste.is_empty()
-        && config.hotkeys.repaste.eq_ignore_ascii_case(&config.hotkeys.transcribe)
+        && config
+            .hotkeys
+            .repaste
+            .eq_ignore_ascii_case(&config.hotkeys.transcribe)
         && config.hotkeys.mode == RecordingMode::PushToTalk
     {
         anyhow::bail!(
@@ -194,7 +201,11 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
     println!(
         "quoteme daemon running. Press {} to {}, {} to cancel.",
         config.hotkeys.transcribe,
-        if config.hotkeys.mode == RecordingMode::Toggle { "toggle" } else { "hold" },
+        if config.hotkeys.mode == RecordingMode::Toggle {
+            "toggle"
+        } else {
+            "hold"
+        },
         config.hotkeys.cancel,
     );
 
@@ -232,7 +243,10 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
 
     // Tap-or-hold state: only active when repaste key == transcribe key in toggle mode.
     let repaste_shares_key = !config.hotkeys.repaste.is_empty()
-        && config.hotkeys.repaste.eq_ignore_ascii_case(&config.hotkeys.transcribe);
+        && config
+            .hotkeys
+            .repaste
+            .eq_ignore_ascii_case(&config.hotkeys.transcribe);
     const HOLD_THRESHOLD: Duration = Duration::from_millis(500);
     let mut key_down_at: Option<Instant> = None;
     let mut key_down_was_idle = false; // idle (not recording) when key went down
@@ -272,33 +286,64 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                                 if $old != $new {
                                     tracing::info!(
                                         "Config changed: {} {:?} → {:?}",
-                                        $key, $old, $new
+                                        $key,
+                                        $old,
+                                        $new
                                     );
                                 }
                             };
                         }
-                        log_change!("transcription.language",
-                            &config.transcription.language, &new_cfg.transcription.language);
-                        log_change!("transcription.word_list_path",
-                            &config.transcription.word_list_path, &new_cfg.transcription.word_list_path);
-                        log_change!("transcription.unload_after_secs",
-                            config.transcription.unload_after_secs, new_cfg.transcription.unload_after_secs);
-                        log_change!("recording.device",
-                            &config.recording.device, &new_cfg.recording.device);
-                        log_change!("recording.mute_system_audio",
-                            config.recording.mute_system_audio, new_cfg.recording.mute_system_audio);
-                        log_change!("recording.silence_timeout_secs",
-                            config.recording.silence_timeout_secs, new_cfg.recording.silence_timeout_secs);
-                        log_change!("paste.method",
-                            &config.paste.method, &new_cfg.paste.method);
-                        log_change!("paste.restore_clipboard",
-                            config.paste.restore_clipboard, new_cfg.paste.restore_clipboard);
-                        log_change!("history.max_recordings",
-                            config.history.max_recordings, new_cfg.history.max_recordings);
-                        log_change!("history.max_age_days",
-                            config.history.max_age_days, new_cfg.history.max_age_days);
-                        log_change!("history.save_cancelled",
-                            config.history.save_cancelled, new_cfg.history.save_cancelled);
+                        log_change!(
+                            "transcription.language",
+                            &config.transcription.language,
+                            &new_cfg.transcription.language
+                        );
+                        log_change!(
+                            "transcription.word_list_path",
+                            &config.transcription.word_list_path,
+                            &new_cfg.transcription.word_list_path
+                        );
+                        log_change!(
+                            "transcription.unload_after_secs",
+                            config.transcription.unload_after_secs,
+                            new_cfg.transcription.unload_after_secs
+                        );
+                        log_change!(
+                            "recording.device",
+                            &config.recording.device,
+                            &new_cfg.recording.device
+                        );
+                        log_change!(
+                            "recording.mute_system_audio",
+                            config.recording.mute_system_audio,
+                            new_cfg.recording.mute_system_audio
+                        );
+                        log_change!(
+                            "recording.silence_timeout_secs",
+                            config.recording.silence_timeout_secs,
+                            new_cfg.recording.silence_timeout_secs
+                        );
+                        log_change!("paste.method", &config.paste.method, &new_cfg.paste.method);
+                        log_change!(
+                            "paste.restore_clipboard",
+                            config.paste.restore_clipboard,
+                            new_cfg.paste.restore_clipboard
+                        );
+                        log_change!(
+                            "history.max_recordings",
+                            config.history.max_recordings,
+                            new_cfg.history.max_recordings
+                        );
+                        log_change!(
+                            "history.max_age_days",
+                            config.history.max_age_days,
+                            new_cfg.history.max_age_days
+                        );
+                        log_change!(
+                            "history.save_cancelled",
+                            config.history.save_cancelled,
+                            new_cfg.history.save_cancelled
+                        );
                         tracing::info!("Config reloaded");
                         config = new_cfg;
                     }
@@ -344,7 +389,11 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
 
         // ---- Poll for completed transcriptions ----
         while let Ok(result) = transcription_rx.try_recv() {
-            let TranscriptionResult::Done { text, audio, duration } = result;
+            let TranscriptionResult::Done {
+                text,
+                audio,
+                duration,
+            } = result;
             handle_done(&config, &text, &audio, duration);
         }
 
@@ -437,7 +486,11 @@ fn spawn_recording(config: &Config) -> Option<ActiveRecording> {
         recording_thread(device, mute, silence_timeout_secs, stop_rx, result_tx);
     });
 
-    Some(ActiveRecording { stop_tx, result_rx, signalled: false })
+    Some(ActiveRecording {
+        stop_tx,
+        result_rx,
+        signalled: false,
+    })
 }
 
 fn spawn_transcription(
@@ -456,7 +509,11 @@ fn spawn_transcription(
     );
     std::thread::spawn(move || {
         tracing::info!("Transcribing {:.1}s of audio…", duration);
-        let prompt_ref: Option<&str> = if prompt.is_empty() { None } else { Some(&prompt) };
+        let prompt_ref: Option<&str> = if prompt.is_empty() {
+            None
+        } else {
+            Some(&prompt)
+        };
         let result = match engine.lock() {
             Ok(mut eng) => eng.transcribe(&audio, &language, prompt_ref),
             Err(_) => Err(anyhow::anyhow!("Engine mutex poisoned")),
@@ -464,7 +521,11 @@ fn spawn_transcription(
         match result {
             Ok(text) => {
                 tracing::info!("Transcription complete: {:?}", text.trim());
-                let _ = tx.send(TranscriptionResult::Done { text, audio, duration });
+                let _ = tx.send(TranscriptionResult::Done {
+                    text,
+                    audio,
+                    duration,
+                });
             }
             Err(e) => {
                 tracing::error!("Transcription failed: {:#}", e);
@@ -521,7 +582,10 @@ fn recording_thread(
                     unmute_system_audio();
                 }
                 let duration = start.elapsed().as_secs_f64();
-                tracing::info!("Recording stopped ({:.1}s), queuing transcription…", duration);
+                tracing::info!(
+                    "Recording stopped ({:.1}s), queuing transcription…",
+                    duration
+                );
                 let _ = result_tx.send(RecordResult::AudioReady { audio, duration });
                 return;
             }
@@ -600,7 +664,9 @@ fn do_repaste(config: &Config) {
 
 fn handle_done(config: &Config, text: &str, audio: &[f32], duration: f64) {
     if !text.is_empty() {
-        if let Err(e) = paste::paste_text(text, &config.paste.method, config.paste.restore_clipboard) {
+        if let Err(e) =
+            paste::paste_text(text, &config.paste.method, config.paste.restore_clipboard)
+        {
             eprintln!("Paste failed: {}", e);
         }
         if let Err(e) = history::save_entry(&config.history, text, audio, duration, false) {
@@ -637,7 +703,10 @@ mod tests {
     /// Config wired to a temp directory with paste=None so tests don't touch the clipboard.
     fn test_config(tmp: &tempfile::TempDir) -> Config {
         Config {
-            paste: PasteConfig { method: PasteMethod::None, restore_clipboard: false },
+            paste: PasteConfig {
+                method: PasteMethod::None,
+                restore_clipboard: false,
+            },
             history: HistoryConfig {
                 path: tmp.path().to_str().unwrap().to_string(),
                 ..HistoryConfig::default()
@@ -653,7 +722,9 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg = test_config(&tmp);
         handle_done(&cfg, "", &[], 1.0);
-        assert!(crate::history::list_entries(&cfg.history).unwrap().is_empty());
+        assert!(crate::history::list_entries(&cfg.history)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -679,7 +750,11 @@ mod tests {
             handle_done(&cfg, &format!("text {}", i), &[], 1.0);
         }
         let entries = crate::history::list_entries(&cfg.history).unwrap();
-        assert_eq!(entries.len(), 2, "cleanup after handle_done should cap at max_recordings");
+        assert_eq!(
+            entries.len(),
+            2,
+            "cleanup after handle_done should cap at max_recordings"
+        );
     }
 
     // ---- handle_cancelled ----
@@ -690,7 +765,9 @@ mod tests {
         let mut cfg = test_config(&tmp);
         cfg.history.save_cancelled = false;
         handle_cancelled(&cfg, &[0.1_f32, 0.2]);
-        assert!(crate::history::list_entries(&cfg.history).unwrap().is_empty());
+        assert!(crate::history::list_entries(&cfg.history)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -711,13 +788,22 @@ mod tests {
         let mut cfg = test_config(&tmp);
         cfg.history.save_cancelled = true;
         handle_cancelled(&cfg, &[]); // empty audio → guard in handle_cancelled
-        assert!(crate::history::list_entries(&cfg.history).unwrap().is_empty());
+        assert!(crate::history::list_entries(&cfg.history)
+            .unwrap()
+            .is_empty());
     }
 
     fn make_active() -> (ActiveRecording, std::sync::mpsc::Sender<RecordResult>) {
         let (stop_tx, _stop_rx) = std::sync::mpsc::sync_channel::<RecordSignal>(1);
         let (result_tx, result_rx) = std::sync::mpsc::channel::<RecordResult>();
-        (ActiveRecording { stop_tx, result_rx, signalled: false }, result_tx)
+        (
+            ActiveRecording {
+                stop_tx,
+                result_rx,
+                signalled: false,
+            },
+            result_tx,
+        )
     }
 
     #[test]
@@ -725,7 +811,12 @@ mod tests {
         let (active_rec, result_tx) = make_active();
         let mut active: Option<ActiveRecording> = Some(active_rec);
 
-        result_tx.send(RecordResult::AudioReady { audio: vec![], duration: 1.0 }).unwrap();
+        result_tx
+            .send(RecordResult::AudioReady {
+                audio: vec![],
+                duration: 1.0,
+            })
+            .unwrap();
 
         if let Some(rec) = &active {
             if let Ok(RecordResult::AudioReady { .. }) = rec.result_rx.try_recv() {
@@ -733,7 +824,10 @@ mod tests {
             }
         }
 
-        assert!(active.is_none(), "active must clear on AudioReady so a new recording can start");
+        assert!(
+            active.is_none(),
+            "active must clear on AudioReady so a new recording can start"
+        );
     }
 
     #[test]
@@ -741,7 +835,9 @@ mod tests {
         let (active_rec, result_tx) = make_active();
         let mut active: Option<ActiveRecording> = Some(active_rec);
 
-        result_tx.send(RecordResult::Cancelled { audio: vec![] }).unwrap();
+        result_tx
+            .send(RecordResult::Cancelled { audio: vec![] })
+            .unwrap();
 
         if let Some(rec) = &active {
             if let Ok(RecordResult::Cancelled { .. }) = rec.result_rx.try_recv() {
@@ -759,7 +855,12 @@ mod tests {
         let mut active: Option<ActiveRecording> = Some(active_rec1);
 
         // First recording finishes — audio returned immediately, no transcription yet.
-        result_tx1.send(RecordResult::AudioReady { audio: vec![], duration: 0.5 }).unwrap();
+        result_tx1
+            .send(RecordResult::AudioReady {
+                audio: vec![],
+                duration: 0.5,
+            })
+            .unwrap();
 
         // Daemon loop: receive AudioReady, clear active (transcription spawned separately).
         if let Some(rec) = &active {
@@ -767,12 +868,18 @@ mod tests {
                 active = None;
             }
         }
-        assert!(active.is_none(), "active must be None before second recording can start");
+        assert!(
+            active.is_none(),
+            "active must be None before second recording can start"
+        );
 
         // User presses RAlt again — second recording starts immediately.
         let (active_rec2, _result_tx2) = make_active();
         active = Some(active_rec2);
-        assert!(active.is_some(), "second recording started while first is still transcribing");
+        assert!(
+            active.is_some(),
+            "second recording started while first is still transcribing"
+        );
     }
 
     #[test]
@@ -804,7 +911,10 @@ mod tests {
         let active = Some(active_rec);
 
         result_tx
-            .send(RecordResult::AudioReady { audio: vec![0.1, 0.2, 0.3], duration: 2.5 })
+            .send(RecordResult::AudioReady {
+                audio: vec![0.1, 0.2, 0.3],
+                duration: 2.5,
+            })
             .unwrap();
 
         if let Some(rec) = &active {
@@ -830,6 +940,9 @@ mod tests {
             }
         }
 
-        assert!(active.is_some(), "active must stay Some while recording is in progress");
+        assert!(
+            active.is_some(),
+            "active must stay Some while recording is in progress"
+        );
     }
 }

@@ -18,18 +18,32 @@ pub struct CheckItem {
 
 impl CheckItem {
     pub fn ok(msg: impl Into<String>) -> Self {
-        Self { status: Status::Ok, message: msg.into() }
+        Self {
+            status: Status::Ok,
+            message: msg.into(),
+        }
     }
     pub fn warn(msg: impl Into<String>) -> Self {
-        Self { status: Status::Warn, message: msg.into() }
+        Self {
+            status: Status::Warn,
+            message: msg.into(),
+        }
     }
     pub fn fail(msg: impl Into<String>) -> Self {
-        Self { status: Status::Fail, message: msg.into() }
+        Self {
+            status: Status::Fail,
+            message: msg.into(),
+        }
     }
     pub fn info(msg: impl Into<String>) -> Self {
-        Self { status: Status::Info, message: msg.into() }
+        Self {
+            status: Status::Info,
+            message: msg.into(),
+        }
     }
-    pub fn is_ok(&self) -> bool { self.status == Status::Ok }
+    pub fn is_ok(&self) -> bool {
+        self.status == Status::Ok
+    }
 }
 
 pub fn check_repaste_hotkey(hotkeys: &HotkeysConfig) -> CheckItem {
@@ -87,10 +101,7 @@ pub fn check_model_path(model_path: &str) -> CheckItem {
     }
     let mp = Path::new(model_path);
     if !mp.exists() {
-        return CheckItem::fail(format!(
-            "Model path: file not found at \"{}\"",
-            model_path
-        ));
+        return CheckItem::fail(format!("Model path: file not found at \"{}\"", model_path));
     }
     let ext = mp
         .extension()
@@ -293,7 +304,12 @@ mod tests {
         let tmp = Builder::new().suffix(".pt").tempfile().unwrap();
         let path = tmp.path().to_str().unwrap().to_string();
         let r = check_model_path(&path);
-        assert!(matches!(r.status, Status::Fail), "expected fail, got {:?}: {}", r.status, r.message);
+        assert!(
+            matches!(r.status, Status::Fail),
+            "expected fail, got {:?}: {}",
+            r.status,
+            r.message
+        );
         assert!(r.message.contains("extension"));
     }
 
@@ -311,7 +327,12 @@ mod tests {
         tmp.write_all(b"tiny").unwrap();
         let path = tmp.path().to_str().unwrap().to_string();
         let r = check_model_path(&path);
-        assert!(matches!(r.status, Status::Warn), "expected warn, got {:?}: {}", r.status, r.message);
+        assert!(
+            matches!(r.status, Status::Warn),
+            "expected warn, got {:?}: {}",
+            r.status,
+            r.message
+        );
         assert!(r.message.contains("very small"));
     }
 
@@ -340,7 +361,11 @@ mod tests {
     fn model_size_missing_file_is_ok() {
         // Nonexistent file → metadata fails → size treated as 0 → ok "0 MB"
         let r = check_model_size("/nonexistent/model.bin");
-        assert!(r.is_ok(), "missing file should not produce a warning, got {:?}", r.status);
+        assert!(
+            r.is_ok(),
+            "missing file should not produce a warning, got {:?}",
+            r.status
+        );
     }
 
     #[test]
@@ -401,6 +426,11 @@ mod tests {
         // parent "ghost" does not exist inside dir, so "ghost/history" has no reachable parent
         let deep = dir.path().join("ghost").join("history");
         let r = check_history_dir(&deep);
-        assert!(matches!(r.status, Status::Warn), "expected warn, got {:?}: {}", r.status, r.message);
+        assert!(
+            matches!(r.status, Status::Warn),
+            "expected warn, got {:?}: {}",
+            r.status,
+            r.message
+        );
     }
 }

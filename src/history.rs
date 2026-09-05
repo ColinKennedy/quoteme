@@ -36,8 +36,7 @@ pub fn save_entry(
     let timestamp = Utc::now();
     let entry_dir = dir.join(&id);
 
-    std::fs::create_dir_all(&entry_dir)
-        .context("Failed to create history entry directory")?;
+    std::fs::create_dir_all(&entry_dir).context("Failed to create history entry directory")?;
 
     std::fs::write(entry_dir.join("transcription.txt"), text)
         .context("Failed to write transcription")?;
@@ -81,7 +80,7 @@ pub fn list_entries(config: &HistoryConfig) -> Result<Vec<HistoryEntry>> {
             }
         }
     }
-    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
     Ok(entries)
 }
 
@@ -159,8 +158,14 @@ mod tests {
         let c = HistoryConfig::default(); // path = ""
         let dir = history_dir(&c);
         let s = dir.to_str().unwrap();
-        assert!(s.contains("quoteme"), "default history dir should be under quoteme/");
-        assert!(s.contains("history"), "default history dir should end in /history");
+        assert!(
+            s.contains("quoteme"),
+            "default history dir should be under quoteme/"
+        );
+        assert!(
+            s.contains("history"),
+            "default history dir should end in /history"
+        );
     }
 
     // ---- save_entry / list_entries ----
@@ -176,9 +181,15 @@ mod tests {
             .collect();
         assert_eq!(entries.len(), 1, "one entry directory expected");
         let entry_dir = &entries[0];
-        assert!(entry_dir.join("transcription.txt").exists(), "transcription.txt missing");
+        assert!(
+            entry_dir.join("transcription.txt").exists(),
+            "transcription.txt missing"
+        );
         assert!(entry_dir.join("audio.wav").exists(), "audio.wav missing");
-        assert!(entry_dir.join("metadata.json").exists(), "metadata.json missing");
+        assert!(
+            entry_dir.join("metadata.json").exists(),
+            "metadata.json missing"
+        );
     }
 
     #[test]
@@ -271,7 +282,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
             save_entry(&c, &format!("entry {}", i), &[], 1.0, false).unwrap();
         }
-        let c_limited = HistoryConfig { max_recordings: 3, ..c };
+        let c_limited = HistoryConfig {
+            max_recordings: 3,
+            ..c
+        };
         cleanup(&c_limited).unwrap();
 
         let remaining = list_entries(&c_limited).unwrap();
@@ -309,7 +323,10 @@ mod tests {
         save_entry(&c, "new entry", &[], 1.0, false).unwrap();
         assert_eq!(list_entries(&c).unwrap().len(), 2);
 
-        let c_limited = HistoryConfig { max_age_days: 7, ..c };
+        let c_limited = HistoryConfig {
+            max_age_days: 7,
+            ..c
+        };
         cleanup(&c_limited).unwrap();
 
         let remaining = list_entries(&c_limited).unwrap();

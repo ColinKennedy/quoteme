@@ -10,7 +10,7 @@ const SPEECH_THRESHOLD_MULTIPLIER: f32 = 4.0;
 // Minimum threshold so we don't treat near-zero-signal recordings as all-speech.
 const MIN_THRESHOLD: f32 = 0.002;
 
-const PREFILL_FRAMES: usize = 5;   // 150ms pre-roll captured before onset
+const PREFILL_FRAMES: usize = 5; // 150ms pre-roll captured before onset
 const HANGOVER_FRAMES: usize = 10; // 300ms tail kept after speech ends
 
 #[inline]
@@ -70,7 +70,10 @@ pub fn filter_silence(audio: &[f32]) -> Vec<f32> {
     }
 
     if speech_out.is_empty() {
-        tracing::debug!("VAD: no speech detected (threshold={:.4}), passing through", threshold);
+        tracing::debug!(
+            "VAD: no speech detected (threshold={:.4}), passing through",
+            threshold
+        );
         return audio.to_vec();
     }
 
@@ -109,7 +112,11 @@ mod tests {
         // Amplitude well below MIN_THRESHOLD (0.002) so no speech is detected.
         let audio = build_audio(&[(0.0001, 32)]);
         let result = filter_silence(&audio);
-        assert_eq!(result.len(), audio.len(), "all-silence audio must pass through unchanged");
+        assert_eq!(
+            result.len(),
+            audio.len(),
+            "all-silence audio must pass through unchanged"
+        );
         assert_eq!(result[0], 0.0001_f32);
     }
 
@@ -122,7 +129,11 @@ mod tests {
         let audio = build_audio(&[(0.0001, 20), (0.5, 3), (0.0001, 20)]);
         let result = filter_silence(&audio);
         let expected = (PREFILL_FRAMES + 3 + HANGOVER_FRAMES) * FRAME_SAMPLES;
-        assert_eq!(result.len(), expected, "VAD should keep prefill + speech + hangover");
+        assert_eq!(
+            result.len(),
+            expected,
+            "VAD should keep prefill + speech + hangover"
+        );
         assert!(result.len() < audio.len(), "VAD must strip silent regions");
     }
 
@@ -133,7 +144,10 @@ mod tests {
         let result = filter_silence(&audio);
         // First PREFILL_FRAMES frames must be quiet (amplitude 0.0001).
         for &s in &result[..PREFILL_FRAMES * FRAME_SAMPLES] {
-            assert_eq!(s, 0.0001_f32, "prefill samples must be from the silent region");
+            assert_eq!(
+                s, 0.0001_f32,
+                "prefill samples must be from the silent region"
+            );
         }
     }
 
@@ -144,7 +158,10 @@ mod tests {
         let result = filter_silence(&audio);
         let hangover_start = result.len() - HANGOVER_FRAMES * FRAME_SAMPLES;
         for &s in &result[hangover_start..] {
-            assert_eq!(s, 0.0001_f32, "hangover samples must come from the silent tail");
+            assert_eq!(
+                s, 0.0001_f32,
+                "hangover samples must come from the silent tail"
+            );
         }
     }
 

@@ -24,7 +24,9 @@ mod win {
                 .context("Failed to get default audio endpoint")?;
 
             // Generic Activate<T>: return type is inferred from the binding
-            device.Activate(CLSCTX_ALL, None).context("Failed to activate IAudioEndpointVolume")
+            device
+                .Activate(CLSCTX_ALL, None)
+                .context("Failed to activate IAudioEndpointVolume")
         }
     }
 

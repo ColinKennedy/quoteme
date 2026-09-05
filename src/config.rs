@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 pub const ENV_CONFIG_VAR: &str = "QUOTEME_CONFIGURATION_FILE";
 const APP_NAME: &str = "quoteme";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub hotkeys: HotkeysConfig,
@@ -19,14 +19,30 @@ pub struct Config {
     pub history: HistoryConfig,
 }
 
-fn default_hotkey_transcribe() -> String { "RAlt".to_string() }
-fn default_hotkey_cancel() -> String { "Escape".to_string() }
-fn default_recording_mode() -> RecordingMode { RecordingMode::Toggle }
-fn default_language() -> String { "en".to_string() }
-fn default_unload_after_secs() -> u64 { 300 }
-fn default_silence_timeout_secs() -> u64 { 20 }
-fn default_paste_method() -> PasteMethod { PasteMethod::CtrlV }
-fn default_restore_clipboard() -> bool { true }
+fn default_hotkey_transcribe() -> String {
+    "RAlt".to_string()
+}
+fn default_hotkey_cancel() -> String {
+    "Escape".to_string()
+}
+fn default_recording_mode() -> RecordingMode {
+    RecordingMode::Toggle
+}
+fn default_language() -> String {
+    "en".to_string()
+}
+fn default_unload_after_secs() -> u64 {
+    300
+}
+fn default_silence_timeout_secs() -> u64 {
+    20
+}
+fn default_paste_method() -> PasteMethod {
+    PasteMethod::CtrlV
+}
+fn default_restore_clipboard() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HotkeysConfig {
@@ -89,7 +105,7 @@ pub enum PasteMethod {
     None,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HistoryConfig {
     #[serde(default)]
     pub path: String,
@@ -138,29 +154,6 @@ impl Default for PasteConfig {
         Self {
             method: PasteMethod::CtrlV,
             restore_clipboard: true,
-        }
-    }
-}
-
-impl Default for HistoryConfig {
-    fn default() -> Self {
-        Self {
-            path: String::new(),
-            max_recordings: 0,
-            max_age_days: 0,
-            save_cancelled: false,
-        }
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            hotkeys: HotkeysConfig::default(),
-            recording: RecordingConfig::default(),
-            transcription: TranscriptionConfig::default(),
-            paste: PasteConfig::default(),
-            history: HistoryConfig::default(),
         }
     }
 }
@@ -233,12 +226,9 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
         }
         "transcription.model_path" => config.transcription.model_path = value.to_string(),
         "transcription.language" => config.transcription.language = value.to_string(),
-        "transcription.word_list_path" => {
-            config.transcription.word_list_path = value.to_string()
-        }
+        "transcription.word_list_path" => config.transcription.word_list_path = value.to_string(),
         "transcription.unload_after_secs" => {
-            config.transcription.unload_after_secs =
-                value.parse().context("Expected a number")?;
+            config.transcription.unload_after_secs = value.parse().context("Expected a number")?;
         }
         "paste.method" => {
             config.paste.method = match value {
@@ -253,8 +243,7 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
             };
         }
         "paste.restore_clipboard" => {
-            config.paste.restore_clipboard =
-                value.parse().context("Expected 'true' or 'false'")?;
+            config.paste.restore_clipboard = value.parse().context("Expected 'true' or 'false'")?;
         }
         "history.path" => config.history.path = value.to_string(),
         "history.max_recordings" => {
@@ -264,8 +253,7 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
             config.history.max_age_days = value.parse().context("Expected a number")?;
         }
         "history.save_cancelled" => {
-            config.history.save_cancelled =
-                value.parse().context("Expected 'true' or 'false'")?;
+            config.history.save_cancelled = value.parse().context("Expected 'true' or 'false'")?;
         }
         _ => {
             let keys = [
@@ -287,7 +275,11 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
                 "transcription.unload_after_secs",
                 "transcription.word_list_path",
             ];
-            let list = keys.iter().map(|k| format!("  {}", k)).collect::<Vec<_>>().join("\n");
+            let list = keys
+                .iter()
+                .map(|k| format!("  {}", k))
+                .collect::<Vec<_>>()
+                .join("\n");
             anyhow::bail!("Unknown config key: '{}'\n\nValid keys:\n{}", key, list)
         }
     }
@@ -349,10 +341,13 @@ mod tests {
     #[test]
     fn partial_toml_fills_in_defaults() {
         let dir = TempDir::new().unwrap();
-        let path = write_config(&dir, r#"
+        let path = write_config(
+            &dir,
+            r#"
             [transcription]
             model_path = "/some/model.bin"
-        "#);
+        "#,
+        );
         let cfg = load_config_from_path(&path).unwrap();
         assert_eq!(cfg.transcription.model_path, "/some/model.bin");
         assert_eq!(cfg.transcription.language, "en");
@@ -362,7 +357,9 @@ mod tests {
     #[test]
     fn full_toml_roundtrip() {
         let dir = TempDir::new().unwrap();
-        let path = write_config(&dir, r#"
+        let path = write_config(
+            &dir,
+            r#"
             [hotkeys]
             transcribe = "F9"
             cancel = "F10"
@@ -383,7 +380,8 @@ mod tests {
             max_recordings = 100
             max_age_days = 30
             save_cancelled = true
-        "#);
+        "#,
+        );
         let cfg = load_config_from_path(&path).unwrap();
         assert_eq!(cfg.hotkeys.transcribe, "F9");
         assert_eq!(cfg.hotkeys.cancel, "F10");
@@ -424,11 +422,14 @@ mod tests {
     #[test]
     fn set_value_preserves_other_fields() {
         let dir = TempDir::new().unwrap();
-        let path = write_config(&dir, r#"
+        let path = write_config(
+            &dir,
+            r#"
             [transcription]
             model_path = "/models/whisper.bin"
             language = "de"
-        "#);
+        "#,
+        );
         set_config_value_at(&path, "hotkeys.transcribe", "F9").unwrap();
         let cfg = load_config_from_path(&path).unwrap();
         assert_eq!(cfg.hotkeys.transcribe, "F9");
@@ -520,8 +521,7 @@ mod tests {
     fn set_value_invalid_bool_errors() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let err =
-            set_config_value_at(&path, "recording.mute_system_audio", "yes").unwrap_err();
+        let err = set_config_value_at(&path, "recording.mute_system_audio", "yes").unwrap_err();
         assert!(err.to_string().contains("Expected 'true' or 'false'"));
     }
 
@@ -529,8 +529,8 @@ mod tests {
     fn set_value_invalid_number_errors() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let err = set_config_value_at(&path, "transcription.unload_after_secs", "fast")
-            .unwrap_err();
+        let err =
+            set_config_value_at(&path, "transcription.unload_after_secs", "fast").unwrap_err();
         assert!(err.to_string().contains("Expected a number"));
     }
 
@@ -599,7 +599,8 @@ mod tests {
     fn set_value_silence_timeout_non_numeric_errors() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let err = set_config_value_at(&path, "recording.silence_timeout_secs", "never").unwrap_err();
+        let err =
+            set_config_value_at(&path, "recording.silence_timeout_secs", "never").unwrap_err();
         assert!(err.to_string().contains("positive number") || err.to_string().contains("number"));
     }
 }

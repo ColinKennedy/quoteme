@@ -45,6 +45,36 @@ pub fn parse_key(s: &str) -> Result<Key> {
     })
 }
 
+/// A parsed hotkey: zero or more modifier keys that must be held simultaneously,
+/// plus a trigger key whose press fires the event.
+///
+/// Use `+` as separator in config strings, e.g. `"Ctrl+Space"` or `"LCtrl+Shift+F9"`.
+/// All parts except the last are modifiers; the last part is the trigger.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hotkey {
+    pub modifiers: Vec<Key>,
+    pub trigger: Key,
+}
+
+/// Parse a hotkey string like `"RAlt"`, `"Ctrl+Space"`, or `"LCtrl+Shift+F9"`.
+pub fn parse_hotkey(s: &str) -> Result<Hotkey> {
+    let parts: Vec<&str> = s.split('+').map(str::trim).collect();
+    if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
+        anyhow::bail!("Invalid hotkey '{}': empty key name in expression", s);
+    }
+    let (modifier_strs, trigger_slice) = parts.split_at(parts.len() - 1);
+    let trigger = parse_key(trigger_slice[0])?;
+    let modifiers = modifier_strs
+        .iter()
+        .map(|k| parse_key(k))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Hotkey { modifiers, trigger })
+}
+
+fn modifiers_held(held: &[Key], hotkey: &Hotkey) -> bool {
+    hotkey.modifiers.iter().all(|m| held.contains(m))
+}
+
 pub fn start_hotkey_listener(
     transcribe_key_str: String,
     cancel_key_str: String,
@@ -52,53 +82,82 @@ pub fn start_hotkey_listener(
     tx: Sender<HotkeyEvent>,
 ) {
     std::thread::spawn(move || {
-        let transcribe_key = match parse_key(&transcribe_key_str) {
+        let transcribe = match parse_hotkey(&transcribe_key_str) {
             Ok(k) => k,
             Err(e) => {
-                eprintln!("Invalid transcribe key '{}': {}", transcribe_key_str, e);
+                tracing::error!("Invalid transcribe key '{}': {}", transcribe_key_str, e);
                 return;
             }
         };
-        let cancel_key = match parse_key(&cancel_key_str) {
+        let cancel = match parse_hotkey(&cancel_key_str) {
             Ok(k) => k,
             Err(e) => {
-                eprintln!("Invalid cancel key '{}': {}", cancel_key_str, e);
+                tracing::error!("Invalid cancel key '{}': {}", cancel_key_str, e);
                 return;
             }
         };
         // Only wire up a dedicated repaste key if it is *different* from the transcribe key.
         // When they are the same key the daemon handles timing itself.
-        let repaste_key: Option<Key> = repaste_key_str
+        let repaste: Option<Hotkey> = repaste_key_str
             .filter(|r| !r.eq_ignore_ascii_case(&transcribe_key_str))
-            .and_then(|r| match parse_key(&r) {
+            .and_then(|r| match parse_hotkey(&r) {
                 Ok(k) => Some(k),
                 Err(e) => {
-                    eprintln!("Invalid repaste key: {}", e);
+                    tracing::error!("Invalid repaste key: {}", e);
                     None
                 }
             });
 
-        // rdev::listen blocks in its own OS message loop
+        tracing::debug!(
+            "Hotkey listener starting — transcribe={:?} cancel={:?} repaste={:?}",
+            transcribe,
+            cancel,
+            repaste
+        );
+
+        // Keys currently held down. Used to track modifier state and suppress auto-repeat.
+        let mut held: Vec<Key> = Vec::new();
+        // True between TranscribeDown and TranscribeUp so we don't emit spurious TranscribeUp
+        // events when the trigger key is pressed without its required modifiers.
+        let mut transcribe_active = false;
+
         if let Err(e) = rdev::listen(move |event: rdev::Event| {
             match event.event_type {
                 EventType::KeyPress(key) => {
-                    if key == transcribe_key {
+                    tracing::trace!("KeyPress({:?}) held={:?}", key, held);
+                    // Suppress duplicate events from OS key auto-repeat.
+                    let is_first_press = !held.contains(&key);
+                    if is_first_press {
+                        held.push(key);
+                    }
+                    if key == transcribe.trigger
+                        && is_first_press
+                        && modifiers_held(&held, &transcribe)
+                    {
+                        transcribe_active = true;
                         let _ = tx.send(HotkeyEvent::TranscribeDown);
-                    } else if key == cancel_key {
+                    }
+                    if key == cancel.trigger && is_first_press && modifiers_held(&held, &cancel) {
                         let _ = tx.send(HotkeyEvent::Cancel);
-                    } else if repaste_key == Some(key) {
-                        let _ = tx.send(HotkeyEvent::Repaste);
+                    }
+                    if let Some(ref rp) = repaste {
+                        if key == rp.trigger && is_first_press && modifiers_held(&held, rp) {
+                            let _ = tx.send(HotkeyEvent::Repaste);
+                        }
                     }
                 }
                 EventType::KeyRelease(key) => {
-                    if key == transcribe_key {
+                    tracing::trace!("KeyRelease({:?}) held={:?}", key, held);
+                    if key == transcribe.trigger && transcribe_active {
+                        transcribe_active = false;
                         let _ = tx.send(HotkeyEvent::TranscribeUp);
                     }
+                    held.retain(|k| k != &key);
                 }
                 _ => {}
             }
         }) {
-            eprintln!("Hotkey listener exited: {:?}", e);
+            tracing::error!("Hotkey listener exited with error: {:?}", e);
         }
     });
 }
@@ -108,39 +167,59 @@ mod tests {
     use super::*;
     use rdev::Key;
 
-    // ---- canonical key names ----
+    // ---- parse_key: canonical names ----
 
     #[test]
-    fn parse_ralt() { assert_eq!(parse_key("RAlt").unwrap(), Key::AltGr); }
+    fn parse_ralt() {
+        assert_eq!(parse_key("RAlt").unwrap(), Key::AltGr);
+    }
 
     #[test]
-    fn parse_lalt() { assert_eq!(parse_key("LAlt").unwrap(), Key::Alt); }
+    fn parse_lalt() {
+        assert_eq!(parse_key("LAlt").unwrap(), Key::Alt);
+    }
 
     #[test]
-    fn parse_rctrl() { assert_eq!(parse_key("RCtrl").unwrap(), Key::ControlRight); }
+    fn parse_rctrl() {
+        assert_eq!(parse_key("RCtrl").unwrap(), Key::ControlRight);
+    }
 
     #[test]
-    fn parse_lctrl() { assert_eq!(parse_key("LCtrl").unwrap(), Key::ControlLeft); }
+    fn parse_lctrl() {
+        assert_eq!(parse_key("LCtrl").unwrap(), Key::ControlLeft);
+    }
 
     #[test]
-    fn parse_rshift() { assert_eq!(parse_key("RShift").unwrap(), Key::ShiftRight); }
+    fn parse_rshift() {
+        assert_eq!(parse_key("RShift").unwrap(), Key::ShiftRight);
+    }
 
     #[test]
-    fn parse_lshift() { assert_eq!(parse_key("LShift").unwrap(), Key::ShiftLeft); }
+    fn parse_lshift() {
+        assert_eq!(parse_key("LShift").unwrap(), Key::ShiftLeft);
+    }
 
     #[test]
-    fn parse_escape() { assert_eq!(parse_key("Escape").unwrap(), Key::Escape); }
+    fn parse_escape() {
+        assert_eq!(parse_key("Escape").unwrap(), Key::Escape);
+    }
 
     #[test]
-    fn parse_space() { assert_eq!(parse_key("Space").unwrap(), Key::Space); }
+    fn parse_space() {
+        assert_eq!(parse_key("Space").unwrap(), Key::Space);
+    }
 
     #[test]
-    fn parse_tab() { assert_eq!(parse_key("Tab").unwrap(), Key::Tab); }
+    fn parse_tab() {
+        assert_eq!(parse_key("Tab").unwrap(), Key::Tab);
+    }
 
     #[test]
-    fn parse_return() { assert_eq!(parse_key("Return").unwrap(), Key::Return); }
+    fn parse_return() {
+        assert_eq!(parse_key("Return").unwrap(), Key::Return);
+    }
 
-    // ---- aliases ----
+    // ---- parse_key: aliases ----
 
     #[test]
     fn parse_ralt_aliases() {
@@ -180,13 +259,23 @@ mod tests {
         assert_eq!(parse_key("esc").unwrap(), Key::Escape);
     }
 
-    // ---- F-keys ----
+    // ---- parse_key: F-keys ----
 
     #[test]
     fn parse_all_f_keys() {
         let expected = [
-            Key::F1, Key::F2, Key::F3, Key::F4, Key::F5, Key::F6,
-            Key::F7, Key::F8, Key::F9, Key::F10, Key::F11, Key::F12,
+            Key::F1,
+            Key::F2,
+            Key::F3,
+            Key::F4,
+            Key::F5,
+            Key::F6,
+            Key::F7,
+            Key::F8,
+            Key::F9,
+            Key::F10,
+            Key::F11,
+            Key::F12,
         ];
         for (i, expected_key) in expected.iter().enumerate() {
             let name = format!("F{}", i + 1);
@@ -199,7 +288,7 @@ mod tests {
         }
     }
 
-    // ---- case insensitivity ----
+    // ---- parse_key: case insensitivity ----
 
     #[test]
     fn parse_key_case_insensitive() {
@@ -210,24 +299,149 @@ mod tests {
         assert_eq!(parse_key("f9").unwrap(), Key::F9);
     }
 
-    // ---- unknown key ----
+    // ---- parse_key: unknown ----
 
     #[test]
     fn parse_key_unknown_errors() {
         assert!(parse_key("UnknownKey").is_err());
         assert!(parse_key("A").is_err());
         assert!(parse_key("").is_err());
-        assert!(parse_key("Ctrl+Alt+Del").is_err());
     }
 
     #[test]
     fn parse_key_error_message_mentions_key() {
         let err = parse_key("BadKey").unwrap_err();
-        // parse_key lowercases the input before matching, so the error contains "badkey".
         assert!(
             err.to_string().contains("badkey") || err.to_string().contains("Unknown key"),
             "error should identify the unrecognised key, got: {}",
             err
         );
+    }
+
+    // ---- parse_hotkey: single key (no modifiers) ----
+
+    #[test]
+    fn parse_hotkey_single_key() {
+        let h = parse_hotkey("RAlt").unwrap();
+        assert_eq!(h.trigger, Key::AltGr);
+        assert!(h.modifiers.is_empty());
+    }
+
+    #[test]
+    fn parse_hotkey_single_space() {
+        let h = parse_hotkey("Space").unwrap();
+        assert_eq!(h.trigger, Key::Space);
+        assert!(h.modifiers.is_empty());
+    }
+
+    #[test]
+    fn parse_hotkey_single_f9() {
+        let h = parse_hotkey("F9").unwrap();
+        assert_eq!(h.trigger, Key::F9);
+        assert!(h.modifiers.is_empty());
+    }
+
+    // ---- parse_hotkey: combos ----
+
+    #[test]
+    fn parse_hotkey_ctrl_space() {
+        let h = parse_hotkey("Ctrl+Space").unwrap();
+        assert_eq!(h.modifiers, vec![Key::ControlLeft]);
+        assert_eq!(h.trigger, Key::Space);
+    }
+
+    #[test]
+    fn parse_hotkey_lctrl_space() {
+        let h = parse_hotkey("LCtrl+Space").unwrap();
+        assert_eq!(h.modifiers, vec![Key::ControlLeft]);
+        assert_eq!(h.trigger, Key::Space);
+    }
+
+    #[test]
+    fn parse_hotkey_rctrl_space() {
+        let h = parse_hotkey("RCtrl+Space").unwrap();
+        assert_eq!(h.modifiers, vec![Key::ControlRight]);
+        assert_eq!(h.trigger, Key::Space);
+    }
+
+    #[test]
+    fn parse_hotkey_two_modifiers() {
+        let h = parse_hotkey("LCtrl+Shift+F9").unwrap();
+        assert_eq!(h.modifiers, vec![Key::ControlLeft, Key::ShiftLeft]);
+        assert_eq!(h.trigger, Key::F9);
+    }
+
+    #[test]
+    fn parse_hotkey_alt_f4() {
+        let h = parse_hotkey("LAlt+F4").unwrap();
+        assert_eq!(h.modifiers, vec![Key::Alt]);
+        assert_eq!(h.trigger, Key::F4);
+    }
+
+    #[test]
+    fn parse_hotkey_case_insensitive() {
+        let h = parse_hotkey("ctrl+space").unwrap();
+        assert_eq!(h.modifiers, vec![Key::ControlLeft]);
+        assert_eq!(h.trigger, Key::Space);
+    }
+
+    #[test]
+    fn parse_hotkey_trims_whitespace() {
+        let h = parse_hotkey("Ctrl + Space").unwrap();
+        assert_eq!(h.modifiers, vec![Key::ControlLeft]);
+        assert_eq!(h.trigger, Key::Space);
+    }
+
+    // ---- parse_hotkey: errors ----
+
+    #[test]
+    fn parse_hotkey_unknown_modifier_errors() {
+        assert!(parse_hotkey("Win+Space").is_err());
+    }
+
+    #[test]
+    fn parse_hotkey_unknown_trigger_errors() {
+        assert!(parse_hotkey("Ctrl+Del").is_err());
+    }
+
+    #[test]
+    fn parse_hotkey_empty_errors() {
+        assert!(parse_hotkey("").is_err());
+    }
+
+    #[test]
+    fn parse_hotkey_trailing_plus_errors() {
+        assert!(parse_hotkey("Ctrl+").is_err());
+    }
+
+    #[test]
+    fn parse_hotkey_leading_plus_errors() {
+        assert!(parse_hotkey("+Space").is_err());
+    }
+
+    // ---- modifiers_held ----
+
+    #[test]
+    fn modifiers_held_no_modifiers_always_true() {
+        let h = parse_hotkey("Space").unwrap();
+        assert!(modifiers_held(&[], &h));
+        assert!(modifiers_held(&[Key::ControlLeft], &h));
+    }
+
+    #[test]
+    fn modifiers_held_with_modifier_requires_it() {
+        let h = parse_hotkey("Ctrl+Space").unwrap();
+        assert!(!modifiers_held(&[], &h));
+        assert!(!modifiers_held(&[Key::ShiftLeft], &h));
+        assert!(modifiers_held(&[Key::ControlLeft], &h));
+        assert!(modifiers_held(&[Key::ControlLeft, Key::ShiftLeft], &h));
+    }
+
+    #[test]
+    fn modifiers_held_two_modifiers_requires_both() {
+        let h = parse_hotkey("LCtrl+Shift+F9").unwrap();
+        assert!(!modifiers_held(&[Key::ControlLeft], &h));
+        assert!(!modifiers_held(&[Key::ShiftLeft], &h));
+        assert!(modifiers_held(&[Key::ControlLeft, Key::ShiftLeft], &h));
     }
 }
