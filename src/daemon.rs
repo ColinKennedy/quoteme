@@ -1027,7 +1027,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let expected = STREAM_MIN_CHUNK_SAMPLES + 123;
         let mut pending = vec![0.25; expected];
-        pending.extend(std::iter::repeat(0.0).take(250 * 16));
+        pending.resize(pending.len() + 250 * 16, 0.0);
         queue_ready_chunks(&mut pending, &tx);
 
         match rx.try_recv() {
