@@ -53,7 +53,7 @@ A recording is represented by `ActiveRecording`, which wraps a `SyncSender<Recor
 ### Transcription (`src/transcription.rs`)
 
 - **`TranscriptionEngine`** — lazy-loads the Whisper model on first use and drops it after `unload_after_secs` of inactivity. Shared across recordings via `Arc<Mutex<TranscriptionEngine>>`.
-- **`StreamingTranscriber`** — accumulates raw audio, runs intermediate 3-second chunk transcriptions with 0.5-second overlap for real-time feedback, then calls `finish()` for one final full-audio pass at highest accuracy. The word list is passed as Whisper's `initial_prompt` (single-pass correction, not a second model pass).
+- **`StreamingTranscriber`** — transcribes raw, pause-delimited 25–30-second chunks while recording continues. Streaming chunks intentionally bypass recording-level VAD because they may begin mid-speech. `finish()` normally transcribes only the remaining tail; it retries the full recording only if an intermediate chunk failed. The word list is included in Whisper's `initial_prompt`.
 
 ### Audio (`src/audio.rs`)
 

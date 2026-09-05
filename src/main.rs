@@ -13,7 +13,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "quoteme", about = "Minimal Whisper speech-to-text transcription CLI")]
+#[command(
+    name = "quoteme",
+    about = "Minimal Whisper speech-to-text transcription CLI"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -120,22 +123,39 @@ fn main() -> Result<()> {
             let cfg = config::load_config()?;
             daemon::run_daemon(cfg)?;
         }
-        Some(Command::List { action: ListAction::History { copy_index } }) => {
+        Some(Command::List {
+            action: ListAction::History { copy_index },
+        }) => {
             cmd_history_list(copy_index)?;
         }
-        Some(Command::List { action: ListAction::Configuration { no_fallbacks } }) => {
+        Some(Command::List {
+            action: ListAction::Configuration { no_fallbacks },
+        }) => {
             cmd_list_configuration(no_fallbacks)?;
         }
-        Some(Command::List { action: ListAction::Microphone }) => {
+        Some(Command::List {
+            action: ListAction::Microphone,
+        }) => {
             cmd_list_microphone()?;
         }
-        Some(Command::List { action: ListAction::Log }) => {
+        Some(Command::List {
+            action: ListAction::Log,
+        }) => {
             cmd_list_log();
         }
-        Some(Command::Check { action: CheckAction::Health { minimal } }) => {
+        Some(Command::Check {
+            action: CheckAction::Health { minimal },
+        }) => {
             cmd_check_health(minimal)?;
         }
-        Some(Command::Configuration { action: ConfigAction::Set { key, value, no_validation } }) => {
+        Some(Command::Configuration {
+            action:
+                ConfigAction::Set {
+                    key,
+                    value,
+                    no_validation,
+                },
+        }) => {
             config::set_config_value(&key, &value)?;
             println!("Set {} = {}", key, value);
             println!("Config file: {}", config::config_path().display());
@@ -153,10 +173,17 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Some(Command::Configuration { action: ConfigAction::SetInteractive { target: ConfigSetTarget::Microphone } }) => {
+        Some(Command::Configuration {
+            action:
+                ConfigAction::SetInteractive {
+                    target: ConfigSetTarget::Microphone,
+                },
+        }) => {
             cmd_config_add_microphone()?;
         }
-        Some(Command::Configuration { action: ConfigAction::Edit { run_with } }) => {
+        Some(Command::Configuration {
+            action: ConfigAction::Edit { run_with },
+        }) => {
             cmd_configuration_edit(run_with)?;
         }
     }
@@ -197,7 +224,11 @@ fn init_tracing(is_daemon: bool) {
                     .with_env_filter(filter)
                     .with_target(false)
                     .init();
-                eprintln!("warning: could not open log file {}: {}", log_path.display(), e);
+                eprintln!(
+                    "warning: could not open log file {}: {}",
+                    log_path.display(),
+                    e
+                );
             }
         }
     } else {
@@ -224,12 +255,18 @@ fn cmd_list_microphone() -> Result<()> {
     println!("Available microphone inputs:");
     println!("  0. [system default]");
     for (i, (name, is_default)) in devices.iter().enumerate() {
-        let tag = if *is_default { "  <- system default" } else { "" };
+        let tag = if *is_default {
+            "  <- system default"
+        } else {
+            ""
+        };
         println!("  {}. {}{}", i + 1, name, tag);
     }
     println!();
     println!("To set a microphone: quoteme configuration set-interactive microphone");
-    println!("To set manually:     quoteme configuration set recording.device \"<name or substring>\"");
+    println!(
+        "To set manually:     quoteme configuration set recording.device \"<name or substring>\""
+    );
     Ok(())
 }
 
@@ -255,11 +292,18 @@ fn cmd_config_add_microphone() -> Result<()> {
     println!("Available microphone inputs:");
     println!("  0. [system default]");
     for (i, (name, is_default)) in devices.iter().enumerate() {
-        let tag = if *is_default { "  <- system default" } else { "" };
+        let tag = if *is_default {
+            "  <- system default"
+        } else {
+            ""
+        };
         println!("  {}. {}{}", i + 1, name, tag);
     }
     println!();
-    print!("Enter number (0–{}) and press Enter (empty to cancel): ", devices.len());
+    print!(
+        "Enter number (0–{}) and press Enter (empty to cancel): ",
+        devices.len()
+    );
     std::io::Write::flush(&mut std::io::stdout())?;
 
     let mut input = String::new();
@@ -355,7 +399,10 @@ fn cmd_list_configuration(no_fallbacks: bool) -> Result<()> {
         if path.exists() {
             println!("Active configuration ({})\n", path.display());
         } else {
-            println!("Active configuration — all defaults (no config file at {})\n", path.display());
+            println!(
+                "Active configuration — all defaults (no config file at {})\n",
+                path.display()
+            );
         }
 
         match config::load_config() {
@@ -395,7 +442,10 @@ fn cmd_check_health(minimal: bool) -> Result<()> {
     let cfg = match config::load_config() {
         Ok(c) => {
             if path.exists() {
-                print_check(health::CheckItem::ok(format!("Config file: {}", path.display())));
+                print_check(health::CheckItem::ok(format!(
+                    "Config file: {}",
+                    path.display()
+                )));
             } else {
                 print_check(health::CheckItem::info(format!(
                     "Config file: not found — using defaults ({})",
@@ -405,7 +455,10 @@ fn cmd_check_health(minimal: bool) -> Result<()> {
             c
         }
         Err(e) => {
-            print_check(health::CheckItem::fail(format!("Config file: parse error — {}", e)));
+            print_check(health::CheckItem::fail(format!(
+                "Config file: parse error — {}",
+                e
+            )));
             return Ok(());
         }
     };
@@ -429,7 +482,9 @@ fn cmd_check_health(minimal: bool) -> Result<()> {
                 Err(e) => println!("\r[FAIL] Model load test: {:#}          ", e),
             }
         } else {
-            print_check(health::CheckItem::info("Model load test: skipped (--minimal)"));
+            print_check(health::CheckItem::info(
+                "Model load test: skipped (--minimal)",
+            ));
         }
     }
 
@@ -443,7 +498,10 @@ fn cmd_check_health(minimal: bool) -> Result<()> {
     // Log file
     let log_path = daemon::log_path();
     if log_path.exists() {
-        print_check(health::CheckItem::ok(format!("Log file: \"{}\"", log_path.display())));
+        print_check(health::CheckItem::ok(format!(
+            "Log file: \"{}\"",
+            log_path.display()
+        )));
     } else {
         print_check(health::CheckItem::info(format!(
             "Log file: \"{}\" (will be created when daemon starts)",
@@ -492,7 +550,10 @@ fn cmd_check_health(minimal: bool) -> Result<()> {
     }
 
     // Hotkeys
-    print_check(health::check_hotkeys(&cfg.hotkeys.transcribe, &cfg.hotkeys.cancel));
+    print_check(health::check_hotkeys(
+        &cfg.hotkeys.transcribe,
+        &cfg.hotkeys.cancel,
+    ));
     print_check(health::check_repaste_hotkey(&cfg.hotkeys));
 
     Ok(())
@@ -500,7 +561,7 @@ fn cmd_check_health(minimal: bool) -> Result<()> {
 
 fn print_check(item: health::CheckItem) {
     match item.status {
-        health::Status::Ok   => println!("[ OK ] {}", item.message),
+        health::Status::Ok => println!("[ OK ] {}", item.message),
         health::Status::Warn => println!("[WARN] {}", item.message),
         health::Status::Fail => println!("[FAIL] {}", item.message),
         health::Status::Info => println!("[INFO] {}", item.message),
@@ -526,7 +587,9 @@ fn cmd_history_list(copy_index: Option<usize>) -> Result<()> {
         }
         let text = &entries[n - 1].text;
         let mut clipboard = arboard::Clipboard::new().context("Failed to open clipboard")?;
-        clipboard.set_text(text).context("Failed to copy to clipboard")?;
+        clipboard
+            .set_text(text)
+            .context("Failed to copy to clipboard")?;
         println!("Copied entry {} to clipboard ({} chars)", n, text.len());
         return Ok(());
     }

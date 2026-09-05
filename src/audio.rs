@@ -7,12 +7,13 @@ pub const WHISPER_SAMPLE_RATE: u32 = 16000;
 
 pub fn list_input_devices() -> Result<Vec<(String, bool)>> {
     let host = cpal::default_host();
-    let default_name = host
-        .default_input_device()
-        .and_then(|d| d.name().ok());
+    let default_name = host.default_input_device().and_then(|d| d.name().ok());
 
     let mut result = Vec::new();
-    for device in host.input_devices().context("Failed to enumerate input devices")? {
+    for device in host
+        .input_devices()
+        .context("Failed to enumerate input devices")?
+    {
         if let Ok(name) = device.name() {
             let is_default = Some(&name) == default_name.as_ref();
             result.push((name, is_default));
@@ -29,7 +30,10 @@ pub fn find_device(name_pattern: &str) -> Result<Device> {
             .context("No default input device found");
     }
     let pattern_lower = name_pattern.to_lowercase();
-    for device in host.input_devices().context("Failed to enumerate input devices")? {
+    for device in host
+        .input_devices()
+        .context("Failed to enumerate input devices")?
+    {
         if let Ok(name) = device.name() {
             if name.to_lowercase().contains(&pattern_lower) {
                 return Ok(device);
@@ -98,7 +102,10 @@ impl AudioCapture {
         };
 
         stream.play().context("Failed to start audio stream")?;
-        Ok(Self { buffer, _stream: stream })
+        Ok(Self {
+            buffer,
+            _stream: stream,
+        })
     }
 
     /// Drain all buffered samples and return them.
@@ -173,8 +180,7 @@ pub fn save_wav(path: &std::path::Path, samples: &[f32], sample_rate: u32) -> Re
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
-    let mut writer =
-        hound::WavWriter::create(path, spec).context("Failed to create WAV file")?;
+    let mut writer = hound::WavWriter::create(path, spec).context("Failed to create WAV file")?;
     for &s in samples {
         writer.write_sample(s)?;
     }
@@ -253,8 +259,7 @@ mod tests {
         assert_eq!(spec.channels, 1);
         assert_eq!(spec.bits_per_sample, 32);
 
-        let read_back: Vec<f32> =
-            reader.samples::<f32>().map(|s| s.unwrap()).collect();
+        let read_back: Vec<f32> = reader.samples::<f32>().map(|s| s.unwrap()).collect();
         assert_eq!(read_back.len(), samples.len());
         for (expected, actual) in samples.iter().zip(read_back.iter()) {
             assert!(
