@@ -5,6 +5,12 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 use crate::vad;
 
+/// Prefer a natural pause after this much audio, giving Whisper useful context.
+pub const STREAM_MIN_CHUNK_SAMPLES: usize = 25 * 16_000;
+/// Never let uncommitted audio grow beyond this duration.
+pub const STREAM_CHUNK_SAMPLES: usize = 30 * 16_000;
+const MIN_FINAL_NEW_SAMPLES: usize = 250 * 16;
+
 pub struct TranscriptionEngine {
     ctx: Option<WhisperContext>,
     model_path: String,
@@ -111,6 +117,27 @@ impl TranscriptionEngine {
         language: &str,
         initial_prompt: Option<&str>,
     ) -> Result<String> {
+        self.transcribe_impl(audio, language, initial_prompt, true)
+    }
+
+    /// Streaming chunks can begin in the middle of speech, so the recording-level
+    /// VAD assumption (quiet audio at the beginning) is invalid for them.
+    fn transcribe_stream_chunk(
+        &mut self,
+        audio: &[f32],
+        language: &str,
+        initial_prompt: Option<&str>,
+    ) -> Result<String> {
+        self.transcribe_impl(audio, language, initial_prompt, false)
+    }
+
+    fn transcribe_impl(
+        &mut self,
+        audio: &[f32],
+        language: &str,
+        initial_prompt: Option<&str>,
+        apply_vad: bool,
+    ) -> Result<String> {
         let audio_secs = audio.len() as f64 / 16_000.0;
         tracing::debug!(
             "Transcription request: {} samples ({:.2}s audio), language={:?}, prompt_chars={}",
@@ -128,8 +155,13 @@ impl TranscriptionEngine {
         }
         self.last_used = Instant::now();
 
-        let audio = vad::filter_silence(audio);
-        let audio = audio.as_slice();
+        let filtered;
+        let audio = if apply_vad {
+            filtered = vad::filter_silence(audio);
+            filtered.as_slice()
+        } else {
+            audio
+        };
         let audio_secs = audio.len() as f64 / 16_000.0;
 
         let ctx = self.ctx.as_ref().unwrap();
@@ -198,6 +230,114 @@ impl TranscriptionEngine {
         );
         Ok(text)
     }
+}
+
+/// Builds one transcript incrementally. Completed chunks are retained as text,
+/// so stopping only needs to infer the short, not-yet-committed tail.
+pub struct StreamingTranscriber {
+    language: String,
+    base_prompt: String,
+    text: String,
+    completed_chunks: usize,
+    failed: bool,
+}
+
+impl StreamingTranscriber {
+    pub fn new(language: String, base_prompt: String) -> Self {
+        Self {
+            language,
+            base_prompt,
+            text: String::new(),
+            completed_chunks: 0,
+            failed: false,
+        }
+    }
+
+    /// Transcribe a chunk while recording continues on another thread.
+    pub fn push_chunk(&mut self, engine: &mut TranscriptionEngine, audio: &[f32]) -> Result<()> {
+        // Once a chunk has proven unreliable, wait for finish() to do one
+        // full-context recovery pass rather than spending time on more chunks.
+        if self.failed {
+            return Ok(());
+        }
+        let prompt = self.context_prompt();
+        match engine.transcribe_stream_chunk(audio, &self.language, prompt.as_deref()) {
+            Ok(chunk_text) => {
+                if implausibly_sparse(audio, &chunk_text) {
+                    self.failed = true;
+                    anyhow::bail!(
+                        "Whisper returned only {} characters for {:.1}s of streaming audio; \
+                         rejecting the incomplete chunk",
+                        chunk_text.chars().filter(|c| !c.is_whitespace()).count(),
+                        audio.len() as f64 / 16_000.0,
+                    );
+                }
+                self.text = append_transcript(&self.text, &chunk_text);
+                self.completed_chunks += 1;
+                tracing::info!(
+                    "Streaming transcription committed chunk {} ({} chars total)",
+                    self.completed_chunks,
+                    self.text.len(),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                // The caller can fall back to a full pass at finish, preserving
+                // correctness if an intermediate inference ever fails.
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// Finish the transcript. In the normal case only `tail` is inferred. The
+    /// full recording is used solely as a correctness fallback after a chunk error.
+    pub fn finish(
+        mut self,
+        engine: &mut TranscriptionEngine,
+        tail: &[f32],
+        full_audio: &[f32],
+    ) -> Result<String> {
+        if self.failed {
+            tracing::warn!("A streaming chunk failed; retrying the full recording");
+            return engine.transcribe(
+                full_audio,
+                &self.language,
+                (!self.base_prompt.is_empty()).then_some(self.base_prompt.as_str()),
+            );
+        }
+
+        if tail.len() >= MIN_FINAL_NEW_SAMPLES || self.completed_chunks == 0 {
+            self.push_chunk(engine, tail)?;
+        }
+        Ok(self.text)
+    }
+
+    fn context_prompt(&self) -> Option<String> {
+        (!self.base_prompt.is_empty()).then(|| self.base_prompt.clone())
+    }
+}
+
+fn implausibly_sparse(audio: &[f32], text: &str) -> bool {
+    let audio_secs = audio.len() as f64 / 16_000.0;
+    if audio_secs < 10.0 {
+        return false;
+    }
+    let non_whitespace_chars = text.chars().filter(|c| !c.is_whitespace()).count();
+    non_whitespace_chars as f64 / audio_secs < 2.0
+}
+
+fn append_transcript(existing: &str, next: &str) -> String {
+    let left = existing.trim();
+    let right = next.trim();
+    if left.is_empty() {
+        return right.to_string();
+    }
+    if right.is_empty() {
+        return left.to_string();
+    }
+
+    format!("{} {}", left, right)
 }
 
 pub fn load_word_list(path: &str) -> Result<String> {
@@ -351,5 +491,34 @@ mod tests {
         let path = dir.path().join("words.txt");
         std::fs::write(&path, "Anthropic").unwrap();
         assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "Anthropic");
+    }
+
+    #[test]
+    fn chunk_transcripts_are_appended_without_altering_words() {
+        assert_eq!(
+            append_transcript("Hello there,", "there is no overlap."),
+            "Hello there, there is no overlap."
+        );
+    }
+
+    #[test]
+    fn transcript_append_adds_one_space() {
+        assert_eq!(append_transcript("hello ", " world"), "hello world");
+    }
+
+    #[test]
+    fn sparse_long_chunk_is_rejected() {
+        assert!(implausibly_sparse(&vec![0.1; 25 * 16_000], "We"));
+    }
+
+    #[test]
+    fn normal_long_chunk_is_accepted() {
+        let text = "This is a normal amount of speech for a longer audio chunk. ".repeat(8);
+        assert!(!implausibly_sparse(&vec![0.1; 25 * 16_000], &text));
+    }
+
+    #[test]
+    fn short_tail_is_never_rejected_for_density() {
+        assert!(!implausibly_sparse(&vec![0.1; 5 * 16_000], "Hi"));
     }
 }

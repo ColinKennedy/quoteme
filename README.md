@@ -2,6 +2,10 @@
 
 A Windows Rust CLI that transcribes speech to text in the background using a local Whisper model.
 
+Long recordings are transcribed incrementally in pause-delimited chunks while you speak. When you
+stop, only the unprocessed tail normally remains, so completion time does not grow with the full
+length of the recording.
+
 ## Building
 
 ### Prerequisites

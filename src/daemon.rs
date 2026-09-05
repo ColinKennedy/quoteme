@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -9,7 +10,10 @@ use crate::config::{self, Config, RecordingMode};
 use crate::history;
 use crate::hotkey::{start_hotkey_listener, HotkeyEvent};
 use crate::paste;
-use crate::transcription::{load_word_list, TranscriptionEngine};
+use crate::transcription::{
+    load_word_list, StreamingTranscriber, TranscriptionEngine, STREAM_CHUNK_SAMPLES,
+    STREAM_MIN_CHUNK_SAMPLES,
+};
 
 // ---------------------------------------------------------------------------
 // PID file helpers
@@ -135,10 +139,20 @@ enum RecordSignal {
 
 /// Sent by the recording thread when audio capture ends.
 enum RecordResult {
-    /// Recording stopped normally. Audio is ready for transcription.
-    AudioReady { audio: Vec<f32>, duration: f64 },
+    /// Capture has stopped; streaming transcription may still be flushing its tail.
+    Stopped,
     /// Recording was cancelled.
     Cancelled { audio: Vec<f32> },
+}
+
+enum StreamCommand {
+    Chunk(Vec<f32>),
+    Finish {
+        tail: Vec<f32>,
+        full_audio: Vec<f32>,
+        duration: f64,
+    },
+    Cancel,
 }
 
 /// Sent by the transcription thread when Whisper inference completes.
@@ -364,16 +378,8 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
         // recording before (or while) transcription runs in its own background thread.
         if let Some(rec) = &active {
             match rec.result_rx.try_recv() {
-                Ok(RecordResult::AudioReady { audio, duration }) => {
+                Ok(RecordResult::Stopped) => {
                     active = None;
-                    spawn_transcription(
-                        audio,
-                        duration,
-                        config.transcription.language.clone(),
-                        word_list.clone(),
-                        engine.clone(),
-                        transcription_tx.clone(),
-                    );
                 }
                 Ok(RecordResult::Cancelled { audio }) => {
                     active = None;
@@ -419,6 +425,7 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                     if repaste_shares_key {
                         // Stop recording on key-down; start recording is deferred to key-up (tap).
                         if let Some(rec) = &mut active {
+                            tracing::info!("Stop requested");
                             rec.signal(RecordSignal::Stop);
                             stopped_recording_on_down = true;
                         } else {
@@ -426,14 +433,25 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                         }
                     } else if config.hotkeys.mode == RecordingMode::Toggle {
                         if let Some(rec) = &mut active {
+                            tracing::info!("Stop requested");
                             rec.signal(RecordSignal::Stop);
                         } else {
-                            active = spawn_recording(&config);
+                            active = spawn_recording(
+                                &config,
+                                engine.clone(),
+                                transcription_tx.clone(),
+                                word_list.clone(),
+                            );
                         }
                     } else {
                         // PushToTalk
                         if active.is_none() {
-                            active = spawn_recording(&config);
+                            active = spawn_recording(
+                                &config,
+                                engine.clone(),
+                                transcription_tx.clone(),
+                                word_list.clone(),
+                            );
                         }
                     }
                 }
@@ -442,11 +460,17 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                     if repaste_shares_key && config.hotkeys.mode == RecordingMode::Toggle {
                         // Tap = start recording; hold = repaste (already fired above).
                         if !hold_repaste_fired && !stopped_recording_on_down && active.is_none() {
-                            active = spawn_recording(&config);
+                            active = spawn_recording(
+                                &config,
+                                engine.clone(),
+                                transcription_tx.clone(),
+                                word_list.clone(),
+                            );
                         }
                         stopped_recording_on_down = false;
                     } else if config.hotkeys.mode == RecordingMode::PushToTalk {
                         if let Some(rec) = &mut active {
+                            tracing::info!("Stop requested");
                             rec.signal(RecordSignal::Stop);
                         }
                     }
@@ -466,24 +490,50 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
             }
         }
 
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn spawn_recording(config: &Config) -> Option<ActiveRecording> {
+fn spawn_recording(
+    config: &Config,
+    engine: Arc<Mutex<TranscriptionEngine>>,
+    transcription_tx: std::sync::mpsc::Sender<TranscriptionResult>,
+    prompt: String,
+) -> Option<ActiveRecording> {
     let (stop_tx, stop_rx) = std::sync::mpsc::sync_channel::<RecordSignal>(1);
     let (result_tx, result_rx) = std::sync::mpsc::channel::<RecordResult>();
 
     let device = config.recording.device.clone();
     let mute = config.recording.mute_system_audio;
     let silence_timeout_secs = config.recording.silence_timeout_secs;
+    let language = config.transcription.language.clone();
+
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamCommand>();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    spawn_streaming_transcription(
+        stream_rx,
+        language,
+        prompt,
+        engine,
+        transcription_tx,
+        cancelled.clone(),
+    );
 
     if mute {
         mute_system_audio();
     }
 
+    tracing::info!("Recording requested");
     std::thread::spawn(move || {
-        recording_thread(device, mute, silence_timeout_secs, stop_rx, result_tx);
+        recording_thread(
+            device,
+            mute,
+            silence_timeout_secs,
+            stop_rx,
+            result_tx,
+            stream_tx,
+            cancelled,
+        );
     });
 
     Some(ActiveRecording {
@@ -493,47 +543,62 @@ fn spawn_recording(config: &Config) -> Option<ActiveRecording> {
     })
 }
 
-fn spawn_transcription(
-    audio: Vec<f32>,
-    duration: f64,
+fn spawn_streaming_transcription(
+    rx: std::sync::mpsc::Receiver<StreamCommand>,
     language: String,
     prompt: String,
     engine: Arc<Mutex<TranscriptionEngine>>,
     tx: std::sync::mpsc::Sender<TranscriptionResult>,
+    cancelled: Arc<AtomicBool>,
 ) {
-    tracing::debug!(
-        "Queuing transcription: {} samples ({:.2}s), language={:?}",
-        audio.len(),
-        duration,
-        language,
-    );
     std::thread::spawn(move || {
-        tracing::info!("Transcribing {:.1}s of audio…", duration);
-        let prompt_ref: Option<&str> = if prompt.is_empty() {
-            None
-        } else {
-            Some(&prompt)
-        };
-        let result = match engine.lock() {
-            Ok(mut eng) => eng.transcribe(&audio, &language, prompt_ref),
-            Err(_) => Err(anyhow::anyhow!("Engine mutex poisoned")),
-        };
-        match result {
-            Ok(text) => {
-                tracing::info!("Transcription complete: {:?}", text.trim());
-                let _ = tx.send(TranscriptionResult::Done {
-                    text,
-                    audio,
-                    duration,
-                });
+        let mut streaming = StreamingTranscriber::new(language, prompt);
+        while let Ok(command) = rx.recv() {
+            if cancelled.load(Ordering::Acquire) {
+                return;
             }
-            Err(e) => {
-                tracing::error!("Transcription failed: {:#}", e);
-                let _ = tx.send(TranscriptionResult::Done {
-                    text: String::new(),
-                    audio,
+            match command {
+                StreamCommand::Chunk(audio) => match engine.lock() {
+                    Ok(mut eng) => {
+                        if let Err(error) = streaming.push_chunk(&mut eng, &audio) {
+                            tracing::error!("Streaming chunk failed: {:#}", error);
+                        }
+                    }
+                    Err(_) => {
+                        tracing::error!("Engine mutex poisoned");
+                        return;
+                    }
+                },
+                StreamCommand::Finish {
+                    tail,
+                    full_audio,
                     duration,
-                });
+                } => {
+                    tracing::info!(
+                        "Flushing {:.2}s streaming tail for {:.1}s recording…",
+                        tail.len() as f64 / 16_000.0,
+                        duration,
+                    );
+                    let result = match engine.lock() {
+                        Ok(mut eng) => streaming.finish(&mut eng, &tail, &full_audio),
+                        Err(_) => Err(anyhow::anyhow!("Engine mutex poisoned")),
+                    };
+                    let text = match result {
+                        Ok(text) => text,
+                        Err(error) => {
+                            tracing::error!("Transcription failed: {:#}", error);
+                            String::new()
+                        }
+                    };
+                    tracing::info!("Transcription complete: {:?}", text.trim());
+                    let _ = tx.send(TranscriptionResult::Done {
+                        text,
+                        audio: full_audio,
+                        duration,
+                    });
+                    return;
+                }
+                StreamCommand::Cancel => return,
             }
         }
     });
@@ -547,6 +612,8 @@ fn recording_thread(
     silence_timeout_secs: u64,
     stop_rx: std::sync::mpsc::Receiver<RecordSignal>,
     result_tx: std::sync::mpsc::Sender<RecordResult>,
+    stream_tx: std::sync::mpsc::Sender<StreamCommand>,
+    cancelled: Arc<AtomicBool>,
 ) {
     let capture = match AudioCapture::start(&device) {
         Ok(c) => {
@@ -555,12 +622,15 @@ fn recording_thread(
         }
         Err(e) => {
             tracing::error!("Failed to start audio capture: {:#}", e);
+            cancelled.store(true, Ordering::Release);
+            let _ = stream_tx.send(StreamCommand::Cancel);
             let _ = result_tx.send(RecordResult::Cancelled { audio: Vec::new() });
             return;
         }
     };
 
     let mut audio: Vec<f32> = Vec::new();
+    let mut pending: Vec<f32> = Vec::with_capacity(STREAM_CHUNK_SAMPLES);
     let start = Instant::now();
     // Silence auto-stop: reset whenever speech is detected.
     let mut last_speech_at = Instant::now();
@@ -578,21 +648,26 @@ fn recording_thread(
                 // before the (potentially slow) transcription begins in its own thread.
                 drop(capture);
                 audio.extend_from_slice(&tail);
+                pending.extend_from_slice(&tail);
                 if mute {
                     unmute_system_audio();
                 }
                 let duration = start.elapsed().as_secs_f64();
-                tracing::info!(
-                    "Recording stopped ({:.1}s), queuing transcription…",
-                    duration
-                );
-                let _ = result_tx.send(RecordResult::AudioReady { audio, duration });
+                tracing::info!("Recording stopped ({:.1}s), flushing tail…", duration);
+                let _ = stream_tx.send(StreamCommand::Finish {
+                    tail: pending,
+                    full_audio: audio,
+                    duration,
+                });
+                let _ = result_tx.send(RecordResult::Stopped);
                 return;
             }
             Ok(RecordSignal::Cancel) => {
                 let tail = capture.take_samples();
                 drop(capture);
                 audio.extend_from_slice(&tail);
+                cancelled.store(true, Ordering::Release);
+                let _ = stream_tx.send(StreamCommand::Cancel);
                 if mute {
                     unmute_system_audio();
                 }
@@ -617,6 +692,8 @@ fn recording_thread(
         }
 
         audio.extend_from_slice(&samples);
+        pending.extend_from_slice(&samples);
+        queue_ready_chunks(&mut pending, &stream_tx);
 
         if silence_timeout_secs > 0
             && last_speech_at.elapsed() >= Duration::from_secs(silence_timeout_secs)
@@ -624,6 +701,7 @@ fn recording_thread(
             let tail = capture.take_samples();
             drop(capture);
             audio.extend_from_slice(&tail);
+            pending.extend_from_slice(&tail);
             if mute {
                 unmute_system_audio();
             }
@@ -633,12 +711,47 @@ fn recording_thread(
                 silence_timeout_secs,
                 duration,
             );
-            let _ = result_tx.send(RecordResult::AudioReady { audio, duration });
+            let _ = stream_tx.send(StreamCommand::Finish {
+                tail: pending,
+                full_audio: audio,
+                duration,
+            });
+            let _ = result_tx.send(RecordResult::Stopped);
             return;
         }
 
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn queue_ready_chunks(pending: &mut Vec<f32>, tx: &std::sync::mpsc::Sender<StreamCommand>) {
+    if pending.len() >= STREAM_MIN_CHUNK_SAMPLES && is_chunk_boundary_silence(pending) {
+        let chunk = std::mem::take(pending);
+        let _ = tx.send(StreamCommand::Chunk(chunk));
+        return;
+    }
+
+    while pending.len() >= STREAM_CHUNK_SAMPLES {
+        let remainder = pending.split_off(STREAM_CHUNK_SAMPLES);
+        let chunk = std::mem::replace(pending, remainder);
+        if tx.send(StreamCommand::Chunk(chunk)).is_err() {
+            pending.clear();
+            return;
+        }
+    }
+}
+
+fn is_chunk_boundary_silence(audio: &[f32]) -> bool {
+    // A single quiet callback can occur inside a word. Require a sustained
+    // 250 ms pause before making it a transcription boundary.
+    const WINDOW_SAMPLES: usize = 250 * 16;
+    const BOUNDARY_RMS_THRESHOLD: f32 = 0.008;
+    if audio.len() < WINDOW_SAMPLES {
+        return false;
+    }
+    let window = &audio[audio.len() - WINDOW_SAMPLES..];
+    let sum_sq: f32 = window.iter().map(|sample| sample * sample).sum();
+    (sum_sq / window.len() as f32).sqrt() <= BOUNDARY_RMS_THRESHOLD
 }
 
 // ---------------------------------------------------------------------------
@@ -807,26 +920,21 @@ mod tests {
     }
 
     #[test]
-    fn audio_ready_clears_active() {
+    fn stopped_clears_active() {
         let (active_rec, result_tx) = make_active();
         let mut active: Option<ActiveRecording> = Some(active_rec);
 
-        result_tx
-            .send(RecordResult::AudioReady {
-                audio: vec![],
-                duration: 1.0,
-            })
-            .unwrap();
+        result_tx.send(RecordResult::Stopped).unwrap();
 
         if let Some(rec) = &active {
-            if let Ok(RecordResult::AudioReady { .. }) = rec.result_rx.try_recv() {
+            if let Ok(RecordResult::Stopped) = rec.result_rx.try_recv() {
                 active = None;
             }
         }
 
         assert!(
             active.is_none(),
-            "active must clear on AudioReady so a new recording can start"
+            "active must clear as soon as capture stops so a new recording can start"
         );
     }
 
@@ -854,17 +962,12 @@ mod tests {
         let (active_rec1, result_tx1) = make_active();
         let mut active: Option<ActiveRecording> = Some(active_rec1);
 
-        // First recording finishes — audio returned immediately, no transcription yet.
-        result_tx1
-            .send(RecordResult::AudioReady {
-                audio: vec![],
-                duration: 0.5,
-            })
-            .unwrap();
+        // First recording capture finishes immediately; its streaming tail may still run.
+        result_tx1.send(RecordResult::Stopped).unwrap();
 
-        // Daemon loop: receive AudioReady, clear active (transcription spawned separately).
+        // Daemon loop: receive Stopped and clear active independently of transcription.
         if let Some(rec) = &active {
-            if let Ok(RecordResult::AudioReady { .. }) = rec.result_rx.try_recv() {
+            if let Ok(RecordResult::Stopped) = rec.result_rx.try_recv() {
                 active = None;
             }
         }
@@ -906,26 +1009,42 @@ mod tests {
     }
 
     #[test]
-    fn audio_ready_carries_audio_and_duration() {
-        let (active_rec, result_tx) = make_active();
-        let active = Some(active_rec);
+    fn hard_limit_queues_a_chunk_during_speech() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut pending = vec![0.25; STREAM_CHUNK_SAMPLES + 123];
+        queue_ready_chunks(&mut pending, &tx);
 
-        result_tx
-            .send(RecordResult::AudioReady {
-                audio: vec![0.1, 0.2, 0.3],
-                duration: 2.5,
-            })
-            .unwrap();
-
-        if let Some(rec) = &active {
-            match rec.result_rx.try_recv() {
-                Ok(RecordResult::AudioReady { audio, duration }) => {
-                    assert_eq!(duration, 2.5);
-                    assert_eq!(audio.len(), 3);
-                }
-                _ => panic!("Expected AudioReady"),
-            }
+        match rx.try_recv() {
+            Ok(StreamCommand::Chunk(chunk)) => assert_eq!(chunk.len(), STREAM_CHUNK_SAMPLES),
+            _ => panic!("Expected one streaming chunk"),
         }
+        assert_eq!(pending.len(), 123);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn natural_pause_queues_whole_chunk_after_minimum() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let expected = STREAM_MIN_CHUNK_SAMPLES + 123;
+        let mut pending = vec![0.25; expected];
+        pending.extend(std::iter::repeat(0.0).take(250 * 16));
+        queue_ready_chunks(&mut pending, &tx);
+
+        match rx.try_recv() {
+            Ok(StreamCommand::Chunk(chunk)) => assert_eq!(chunk.len(), expected + 250 * 16),
+            _ => panic!("Expected a pause-delimited streaming chunk"),
+        }
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn short_pause_does_not_queue_too_little_context() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut pending = vec![0.25; STREAM_MIN_CHUNK_SAMPLES - 1];
+        queue_ready_chunks(&mut pending, &tx);
+
+        assert!(rx.try_recv().is_err());
+        assert_eq!(pending.len(), STREAM_MIN_CHUNK_SAMPLES - 1);
     }
 
     #[test]
@@ -935,7 +1054,7 @@ mod tests {
 
         // Nothing sent on result_tx — active should remain Some.
         if let Some(rec) = &active {
-            if let Ok(RecordResult::AudioReady { .. }) = rec.result_rx.try_recv() {
+            if let Ok(RecordResult::Stopped) = rec.result_rx.try_recv() {
                 active = None;
             }
         }
