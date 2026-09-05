@@ -35,12 +35,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # cpal needs ALSA, rdev needs X11, whisper-rs-sys' bindgen needs libclang.
+      # cpal needs ALSA; rdev needs X11, XInput, and XTest; whisper-rs-sys needs libclang.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libx11-dev libxi-dev libclang-dev
+          sudo apt-get install -y libasound2-dev libx11-dev libxi-dev libxtst-dev libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
