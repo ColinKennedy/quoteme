@@ -17,7 +17,7 @@ jobs:
     name: Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -33,14 +33,14 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # cpal needs ALSA, rdev needs X11, whisper-rs-sys' bindgen needs libclang.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libx11-dev libclang-dev
+          sudo apt-get install -y libasound2-dev libx11-dev libxi-dev libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
