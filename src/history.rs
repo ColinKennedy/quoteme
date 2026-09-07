@@ -5,6 +5,13 @@ use std::path::PathBuf;
 
 use crate::config::HistoryConfig;
 
+#[derive(Debug, Clone)]
+pub struct PendingEntry {
+    pub id: String,
+    pub timestamp: DateTime<Utc>,
+    pub dir: PathBuf,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub id: String,
@@ -24,6 +31,7 @@ pub fn history_dir(config: &HistoryConfig) -> PathBuf {
         .join("history")
 }
 
+#[cfg(test)]
 pub fn save_entry(
     config: &HistoryConfig,
     text: &str,
@@ -31,32 +39,59 @@ pub fn save_entry(
     duration_secs: f64,
     cancelled: bool,
 ) -> Result<()> {
-    let dir = history_dir(config);
+    let pending = create_pending_entry(config)?;
+    finalize_entry(&pending, text, audio, duration_secs, cancelled)
+}
+
+/// Reserve the recording's history directory before transcription starts so
+/// live screenshots can be written beside the eventual transcript and audio.
+pub fn create_pending_entry(config: &HistoryConfig) -> Result<PendingEntry> {
     let id = uuid::Uuid::new_v4().to_string();
-    let timestamp = Utc::now();
-    let entry_dir = dir.join(&id);
+    let dir = history_dir(config).join(&id);
+    std::fs::create_dir_all(&dir).context("Failed to create history entry directory")?;
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    Ok(PendingEntry {
+        id,
+        timestamp: Utc::now(),
+        dir,
+    })
+}
 
-    std::fs::create_dir_all(&entry_dir).context("Failed to create history entry directory")?;
+pub fn discard_pending_entry(entry: &PendingEntry) -> Result<()> {
+    if entry.dir.exists() {
+        std::fs::remove_dir_all(&entry.dir).context("Failed to discard pending history entry")?;
+    }
+    Ok(())
+}
 
-    std::fs::write(entry_dir.join("transcription.txt"), text)
+pub fn finalize_entry(
+    pending: &PendingEntry,
+    text: &str,
+    audio: &[f32],
+    duration_secs: f64,
+    cancelled: bool,
+) -> Result<()> {
+    std::fs::create_dir_all(&pending.dir).context("Failed to create history entry directory")?;
+
+    std::fs::write(pending.dir.join("transcription.txt"), text)
         .context("Failed to write transcription")?;
 
     crate::audio::save_wav(
-        &entry_dir.join("audio.wav"),
+        &pending.dir.join("audio.wav"),
         audio,
         crate::audio::WHISPER_SAMPLE_RATE,
     )
     .context("Failed to save audio")?;
 
     let entry = HistoryEntry {
-        id,
-        timestamp,
+        id: pending.id.clone(),
+        timestamp: pending.timestamp,
         text: text.to_string(),
         duration_secs,
         cancelled,
     };
     std::fs::write(
-        entry_dir.join("metadata.json"),
+        pending.dir.join("metadata.json"),
         serde_json::to_string_pretty(&entry)?,
     )
     .context("Failed to write metadata")?;

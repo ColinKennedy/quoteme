@@ -12,6 +12,10 @@ Long recordings are transcribed incrementally in pause-delimited chunks while yo
 stop, only the unprocessed tail normally remains, so completion time does not grow with the full
 length of the recording.
 
+Saying **“this here”** during a recording captures the active window, including the mouse cursor.
+The PNG is stored beside `transcription.txt`, and its absolute path is inserted immediately after
+the command in the transcript. Matching is case-insensitive and the phrase is configurable.
+
 ## Building
 
 ### Prerequisites
@@ -23,7 +27,7 @@ length of the recording.
 
 ```powershell
 cargo build --release
-# Output: target/release/quoteme.exe
+# Outputs: target/release/quoteme.exe and target/release/quoteme-images.exe
 ```
 
 ### CUDA build
@@ -87,6 +91,7 @@ quoteme configuration edit --run-with code
 | `hotkeys.cancel` | `Escape` | Key to cancel recording |
 | `hotkeys.mode` | `toggle` | `toggle` or `push_to_talk` |
 | `hotkeys.consume_transcribe_key` | `false` | Swallow the transcribe key so it isn't also typed (e.g. Space, Tab) |
+| `hotkeys.image_editor` | `Ctrl+Alt+I` | Open the screenshot review/crop binary; empty leaves it unbound and produces a health warning |
 | `recording.device` | *(default mic)* | Substring match against device name |
 | `recording.mute_system_audio` | `false` | Mute speakers while recording (Windows only) |
 | `recording.silence_timeout_secs` | `20` | Auto-stop after N seconds of silence; minimum 1 |
@@ -100,6 +105,22 @@ quoteme configuration edit --run-with code
 | `history.max_recordings` | `0` | Prune oldest beyond this count; `0` = unlimited |
 | `history.max_age_days` | `0` | Prune entries older than N days; `0` = unlimited |
 | `history.save_cancelled` | `false` | Keep cancelled recordings in history |
+| `screenshots.phrase` | `this here` | Case-insensitive spoken screenshot command; empty is invalid and disables live detection at runtime |
+
+## Screenshot review and cropping
+
+Builds produce a separate `quoteme-images.exe` beside the main executable. Open it with
+`Ctrl+Alt+I` (configurable), or run it directly. It groups screenshots by transcript date/time.
+
+| Input | Action |
+|---|---|
+| `H` / `L` | Previous / next screenshot, cycling at the ends |
+| `J` / `K` | Next / previous transcript group |
+| `+` / `-` | Zoom in / out |
+| Mouse drag | Select a crop region |
+| `Enter` | Queue the crop and advance to the next screenshot |
+| `Ctrl+S` | Apply all queued crops in the current transcript as one batch |
+| `Esc` | Clear the selection; press again to exit |
 
 ### Word list format
 

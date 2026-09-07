@@ -16,6 +16,10 @@ name = "quoteme-cuda"
 path = "src/main.rs"
 required-features = ["cuda"]
 
+[[bin]]
+name = "quoteme-images"
+path = "src/bin/quoteme-images.rs"
+
 [dependencies]
 anyhow = "1"
 arboard = "3"
@@ -25,6 +29,7 @@ cpal = "0.15"
 dirs = "5"
 enigo = "0.1"
 hound = "3.5"
+image = { version = "0.25", default-features = false, features = ["png"] }
 rdev = { version = "0.5", features = ["unstable_grab"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,10 +42,15 @@ whisper-rs = "0.11"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.52", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_System_Variant",
 ] }

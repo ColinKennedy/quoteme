@@ -6,6 +6,7 @@ mod health;
 mod history;
 mod hotkey;
 mod paste;
+mod screenshot;
 mod transcription;
 mod vad;
 
@@ -555,6 +556,8 @@ fn cmd_check_health(minimal: bool) -> Result<()> {
         &cfg.hotkeys.cancel,
     ));
     print_check(health::check_repaste_hotkey(&cfg.hotkeys));
+    print_check(health::check_image_editor_hotkey(&cfg.hotkeys));
+    print_check(health::check_screenshot_phrase(&cfg.screenshots.phrase));
 
     Ok(())
 }

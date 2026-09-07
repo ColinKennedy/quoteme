@@ -79,6 +79,46 @@ pub fn check_repaste_hotkey(hotkeys: &HotkeysConfig) -> CheckItem {
     }
 }
 
+pub fn check_image_editor_hotkey(hotkeys: &HotkeysConfig) -> CheckItem {
+    if hotkeys.image_editor.trim().is_empty() {
+        return CheckItem::warn(
+            "Image editor hotkey: unbound — screenshots can only be reviewed by launching quoteme-images manually",
+        );
+    }
+    if hotkeys.image_editor.eq_ignore_ascii_case(&hotkeys.cancel)
+        || hotkeys
+            .image_editor
+            .eq_ignore_ascii_case(&hotkeys.transcribe)
+        || (!hotkeys.repaste.is_empty()
+            && hotkeys.image_editor.eq_ignore_ascii_case(&hotkeys.repaste))
+    {
+        return CheckItem::fail(format!(
+            "Image editor hotkey conflict: \"{}\" is already in use",
+            hotkeys.image_editor
+        ));
+    }
+    match crate::hotkey::parse_hotkey(&hotkeys.image_editor) {
+        Ok(_) => CheckItem::ok(format!("Image editor hotkey: \"{}\"", hotkeys.image_editor)),
+        Err(error) => CheckItem::fail(format!(
+            "Image editor hotkey: invalid binding \"{}\" — {}",
+            hotkeys.image_editor, error
+        )),
+    }
+}
+
+pub fn check_screenshot_phrase(phrase: &str) -> CheckItem {
+    if phrase.trim().is_empty() {
+        CheckItem::fail(
+            "Screenshot phrase: empty — live screenshot detection is disabled; set screenshots.phrase",
+        )
+    } else {
+        CheckItem::ok(format!(
+            "Screenshot phrase: \"{}\" (case-insensitive)",
+            phrase.trim()
+        ))
+    }
+}
+
 pub fn check_hotkeys(transcribe: &str, cancel: &str) -> CheckItem {
     if transcribe == cancel {
         CheckItem::fail(format!(
@@ -205,6 +245,7 @@ mod tests {
             repaste: "Escape".to_string(),
             mode: RecordingMode::Toggle,
             consume_transcribe_key: false,
+            image_editor: "Ctrl+Alt+I".to_string(),
         };
         let r = check_repaste_hotkey(&hotkeys);
         assert!(matches!(r.status, Status::Fail));
@@ -219,6 +260,7 @@ mod tests {
             repaste: "ESCAPE".to_string(),
             mode: RecordingMode::Toggle,
             consume_transcribe_key: false,
+            image_editor: "Ctrl+Alt+I".to_string(),
         };
         let r = check_repaste_hotkey(&hotkeys);
         assert!(matches!(r.status, Status::Fail));
@@ -232,6 +274,7 @@ mod tests {
             repaste: "RAlt".to_string(),
             mode: RecordingMode::PushToTalk,
             consume_transcribe_key: false,
+            image_editor: "Ctrl+Alt+I".to_string(),
         };
         let r = check_repaste_hotkey(&hotkeys);
         assert!(matches!(r.status, Status::Fail));
@@ -246,6 +289,7 @@ mod tests {
             repaste: "RAlt".to_string(),
             mode: RecordingMode::Toggle,
             consume_transcribe_key: false,
+            image_editor: "Ctrl+Alt+I".to_string(),
         };
         let r = check_repaste_hotkey(&hotkeys);
         assert!(r.is_ok(), "same key in toggle mode should be OK (tap/hold)");
@@ -260,10 +304,32 @@ mod tests {
             repaste: "F9".to_string(),
             mode: RecordingMode::Toggle,
             consume_transcribe_key: false,
+            image_editor: "Ctrl+Alt+I".to_string(),
         };
         let r = check_repaste_hotkey(&hotkeys);
         assert!(r.is_ok());
         assert!(r.message.contains("F9"));
+    }
+
+    #[test]
+    fn image_editor_unbound_is_warning() {
+        let mut hotkeys = HotkeysConfig::default();
+        hotkeys.image_editor.clear();
+        assert!(matches!(
+            check_image_editor_hotkey(&hotkeys).status,
+            Status::Warn
+        ));
+    }
+
+    #[test]
+    fn default_image_editor_hotkey_is_valid() {
+        assert!(check_image_editor_hotkey(&HotkeysConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn screenshot_phrase_is_case_insensitive_and_nonempty() {
+        assert!(check_screenshot_phrase("This Here").is_ok());
+        assert!(matches!(check_screenshot_phrase("  ").status, Status::Fail));
     }
 
     // --- hotkeys ---

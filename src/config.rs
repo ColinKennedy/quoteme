@@ -17,6 +17,8 @@ pub struct Config {
     pub paste: PasteConfig,
     #[serde(default)]
     pub history: HistoryConfig,
+    #[serde(default)]
+    pub screenshots: ScreenshotsConfig,
 }
 
 fn default_hotkey_transcribe() -> String {
@@ -43,6 +45,12 @@ fn default_paste_method() -> PasteMethod {
 fn default_restore_clipboard() -> bool {
     true
 }
+fn default_screenshot_phrase() -> String {
+    "this here".to_string()
+}
+fn default_image_editor_hotkey() -> String {
+    "Ctrl+Alt+I".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HotkeysConfig {
@@ -60,6 +68,9 @@ pub struct HotkeysConfig {
     /// focused application (e.g. Space or Tab would otherwise insert a character).
     #[serde(default)]
     pub consume_transcribe_key: bool,
+    /// Opens the screenshot review/crop application. Empty = unbound.
+    #[serde(default = "default_image_editor_hotkey")]
+    pub image_editor: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -121,6 +132,22 @@ pub struct HistoryConfig {
     pub save_cancelled: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenshotsConfig {
+    /// Case-insensitive spoken command. Empty disables live detection at runtime,
+    /// but is considered an invalid enabled configuration by health checks.
+    #[serde(default = "default_screenshot_phrase")]
+    pub phrase: String,
+}
+
+impl Default for ScreenshotsConfig {
+    fn default() -> Self {
+        Self {
+            phrase: default_screenshot_phrase(),
+        }
+    }
+}
+
 impl Default for HotkeysConfig {
     fn default() -> Self {
         Self {
@@ -129,6 +156,7 @@ impl Default for HotkeysConfig {
             mode: RecordingMode::Toggle,
             repaste: String::new(),
             consume_transcribe_key: false,
+            image_editor: default_image_editor_hotkey(),
         }
     }
 }
@@ -212,6 +240,7 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
             config.hotkeys.consume_transcribe_key =
                 value.parse().context("Expected 'true' or 'false'")?;
         }
+        "hotkeys.image_editor" => config.hotkeys.image_editor = value.to_string(),
         "hotkeys.mode" => {
             config.hotkeys.mode = match value {
                 "toggle" => RecordingMode::Toggle,
@@ -264,6 +293,12 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
         "history.save_cancelled" => {
             config.history.save_cancelled = value.parse().context("Expected 'true' or 'false'")?;
         }
+        "screenshots.phrase" => {
+            if value.trim().is_empty() {
+                anyhow::bail!("screenshots.phrase cannot be empty");
+            }
+            config.screenshots.phrase = value.trim().to_string();
+        }
         _ => {
             let keys = [
                 "history.max_age_days",
@@ -272,6 +307,7 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
                 "history.save_cancelled",
                 "hotkeys.cancel",
                 "hotkeys.consume_transcribe_key",
+                "hotkeys.image_editor",
                 "hotkeys.mode",
                 "hotkeys.repaste",
                 "hotkeys.transcribe",
@@ -284,6 +320,7 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
                 "transcription.model_path",
                 "transcription.unload_after_secs",
                 "transcription.word_list_path",
+                "screenshots.phrase",
             ];
             let list = keys
                 .iter()
@@ -324,6 +361,7 @@ mod tests {
         assert_eq!(cfg.hotkeys.cancel, "Escape");
         assert_eq!(cfg.hotkeys.mode, RecordingMode::Toggle);
         assert!(!cfg.hotkeys.consume_transcribe_key);
+        assert_eq!(cfg.hotkeys.image_editor, "Ctrl+Alt+I");
         assert!(cfg.recording.device.is_empty());
         assert!(!cfg.recording.mute_system_audio);
         assert!(cfg.transcription.model_path.is_empty());
@@ -336,6 +374,7 @@ mod tests {
         assert_eq!(cfg.history.max_recordings, 0);
         assert_eq!(cfg.history.max_age_days, 0);
         assert!(!cfg.history.save_cancelled);
+        assert_eq!(cfg.screenshots.phrase, "this here");
     }
 
     // --- load_config_from_path ---

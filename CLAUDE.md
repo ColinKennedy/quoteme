@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```powershell
 # Build CPU binary (default)
-cargo build --release                          # → target/release/quoteme.exe
+cargo build --release                          # → quoteme.exe + quoteme-images.exe
 
 # Build CUDA binary (requires NVIDIA GPU + CUDA Toolkit 12.x)
 cargo build --release --features cuda --bin quoteme-cuda   # → target/release/quoteme-cuda.exe
@@ -86,6 +86,7 @@ Each recording is stored as a UUID-named subdirectory under `%APPDATA%\quoteme\h
 | `hotkeys.cancel` | `Escape` | Key to cancel recording |
 | `hotkeys.mode` | `toggle` | `toggle` or `push_to_talk` |
 | `hotkeys.consume_transcribe_key` | `false` | Swallow the transcribe key so it isn't also typed into the focused app (e.g. Space, Tab) |
+| `hotkeys.image_editor` | `Ctrl+Alt+I` | Open `quoteme-images.exe`; empty = unbound |
 | `recording.device` | *(empty — default mic)* | Substring match against device name |
 | `recording.mute_system_audio` | `false` | Mute speakers while recording (Windows only) |
 | `recording.silence_timeout_secs` | `20` | Auto-stop after N seconds of silence; minimum 1 |
@@ -99,3 +100,4 @@ Each recording is stored as a UUID-named subdirectory under `%APPDATA%\quoteme\h
 | `history.max_recordings` | `0` (unlimited) | Prune oldest beyond this count |
 | `history.max_age_days` | `0` (unlimited) | Prune entries older than N days |
 | `history.save_cancelled` | `false` | Keep cancelled recordings in history |
+| `screenshots.phrase` | `this here` | Case-insensitive active-window screenshot command |

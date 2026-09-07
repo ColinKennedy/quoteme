@@ -131,6 +131,18 @@ impl TranscriptionEngine {
         self.transcribe_impl(audio, language, initial_prompt, false)
     }
 
+    /// Decode a short rolling window solely for command spotting. This is kept
+    /// separate from StreamingTranscriber so probe text never enters the final
+    /// transcript twice.
+    pub fn transcribe_command_probe(
+        &mut self,
+        audio: &[f32],
+        language: &str,
+        phrase: &str,
+    ) -> Result<String> {
+        self.transcribe_impl(audio, language, Some(phrase), false)
+    }
+
     fn transcribe_impl(
         &mut self,
         audio: &[f32],

@@ -12,6 +12,7 @@ pub enum HotkeyEvent {
     /// *different* key than `transcribe`. When they share a key, the daemon's
     /// tap-or-hold logic emits the repaste action directly.
     Repaste,
+    OpenImageEditor,
 }
 
 pub fn parse_key(s: &str) -> Result<Key> {
@@ -38,9 +39,35 @@ pub fn parse_key(s: &str) -> Result<Key> {
         "f10" => Key::F10,
         "f11" => Key::F11,
         "f12" => Key::F12,
+        "a" => Key::KeyA,
+        "b" => Key::KeyB,
+        "c" => Key::KeyC,
+        "d" => Key::KeyD,
+        "e" => Key::KeyE,
+        "f" => Key::KeyF,
+        "g" => Key::KeyG,
+        "h" => Key::KeyH,
+        "i" => Key::KeyI,
+        "j" => Key::KeyJ,
+        "k" => Key::KeyK,
+        "l" => Key::KeyL,
+        "m" => Key::KeyM,
+        "n" => Key::KeyN,
+        "o" => Key::KeyO,
+        "p" => Key::KeyP,
+        "q" => Key::KeyQ,
+        "r" => Key::KeyR,
+        "s" => Key::KeyS,
+        "t" => Key::KeyT,
+        "u" => Key::KeyU,
+        "v" => Key::KeyV,
+        "w" => Key::KeyW,
+        "x" => Key::KeyX,
+        "y" => Key::KeyY,
+        "z" => Key::KeyZ,
         other => anyhow::bail!(
             "Unknown key: '{}'. Supported: RAlt, LAlt, RCtrl, LCtrl, RShift, LShift, \
-             Escape, Space, Tab, Return, F1-F12",
+             Escape, Space, Tab, Return, A-Z, F1-F12",
             other
         ),
     })
@@ -76,11 +103,29 @@ fn modifiers_held(held: &[Key], hotkey: &Hotkey) -> bool {
     // Match the complete modifier set. Without this, Ctrl+F10 also matches bare
     // F10, so a repaste shortcut can unexpectedly toggle recording.
     let held_modifiers: Vec<&Key> = held.iter().filter(|key| is_modifier(key)).collect();
-    held_modifiers.len() == hotkey.modifiers.len()
-        && hotkey
-            .modifiers
+    if held_modifiers.len() != hotkey.modifiers.len() {
+        return false;
+    }
+    let mut remaining = held_modifiers;
+    hotkey.modifiers.iter().all(|expected| {
+        let Some(index) = remaining
             .iter()
-            .all(|modifier| held_modifiers.contains(&modifier))
+            .position(|actual| same_modifier_family(expected, actual))
+        else {
+            return false;
+        };
+        remaining.remove(index);
+        true
+    })
+}
+
+fn same_modifier_family(a: &Key, b: &Key) -> bool {
+    a == b
+        || (matches!(a, Key::ControlLeft | Key::ControlRight)
+            && matches!(b, Key::ControlLeft | Key::ControlRight))
+        || (matches!(a, Key::ShiftLeft | Key::ShiftRight)
+            && matches!(b, Key::ShiftLeft | Key::ShiftRight))
+        || (matches!(a, Key::Alt | Key::AltGr) && matches!(b, Key::Alt | Key::AltGr))
 }
 
 fn is_modifier(key: &Key) -> bool {
@@ -112,6 +157,7 @@ pub fn start_hotkey_listener(
     transcribe_key_str: String,
     cancel_key_str: String,
     repaste_key_str: Option<String>,
+    image_editor_key_str: Option<String>,
     consume_transcribe_key: bool,
     tx: Sender<HotkeyEvent>,
 ) {
@@ -141,13 +187,21 @@ pub fn start_hotkey_listener(
                     None
                 }
             });
+        let image_editor = image_editor_key_str.and_then(|raw| match parse_hotkey(&raw) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                tracing::error!("Invalid image editor hotkey '{}': {}", raw, error);
+                None
+            }
+        });
 
         tracing::debug!(
-            "Hotkey listener starting — transcribe={:?} cancel={:?} repaste={:?} \
+            "Hotkey listener starting — transcribe={:?} cancel={:?} repaste={:?} editor={:?} \
              consume_transcribe_key={}",
             transcribe,
             cancel,
             repaste,
+            image_editor,
             consume_transcribe_key,
         );
 
@@ -173,6 +227,11 @@ pub fn start_hotkey_listener(
                             st.transcribe_active = true;
                             st.trigger_consumed = consume_transcribe_key;
                             let _ = tx.send(HotkeyEvent::TranscribeDown);
+                        }
+                        if let Some(ref editor) = image_editor {
+                            if key == editor.trigger && modifiers_held(&st.held, editor) {
+                                let _ = tx.send(HotkeyEvent::OpenImageEditor);
+                            }
                         }
                         if st.trigger_consumed {
                             // Swallow the press (and any auto-repeats) so it isn't
@@ -362,7 +421,6 @@ mod tests {
     #[test]
     fn parse_key_unknown_errors() {
         assert!(parse_key("UnknownKey").is_err());
-        assert!(parse_key("A").is_err());
         assert!(parse_key("").is_err());
     }
 
