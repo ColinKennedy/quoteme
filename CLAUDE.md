@@ -85,6 +85,7 @@ Each recording is stored as a UUID-named subdirectory under `%APPDATA%\quoteme\h
 | `hotkeys.transcribe` | `RAlt` | Key to start/stop recording |
 | `hotkeys.cancel` | `Escape` | Key to cancel recording |
 | `hotkeys.mode` | `toggle` | `toggle` or `push_to_talk` |
+| `hotkeys.consume_transcribe_key` | `false` | Swallow the transcribe key so it isn't also typed into the focused app (e.g. Space, Tab) |
 | `recording.device` | *(empty — default mic)* | Substring match against device name |
 | `recording.mute_system_audio` | `false` | Mute speakers while recording (Windows only) |
 | `recording.silence_timeout_secs` | `20` | Auto-stop after N seconds of silence; minimum 1 |

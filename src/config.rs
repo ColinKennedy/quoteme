@@ -56,6 +56,10 @@ pub struct HotkeysConfig {
     /// If set to the same key as `transcribe` (toggle mode only): tap = record, hold = repaste.
     #[serde(default)]
     pub repaste: String,
+    /// When true, the transcribe hotkey is swallowed so it isn't also typed into the
+    /// focused application (e.g. Space or Tab would otherwise insert a character).
+    #[serde(default)]
+    pub consume_transcribe_key: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -124,6 +128,7 @@ impl Default for HotkeysConfig {
             cancel: "Escape".to_string(),
             mode: RecordingMode::Toggle,
             repaste: String::new(),
+            consume_transcribe_key: false,
         }
     }
 }
@@ -203,6 +208,10 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
         "hotkeys.transcribe" => config.hotkeys.transcribe = value.to_string(),
         "hotkeys.cancel" => config.hotkeys.cancel = value.to_string(),
         "hotkeys.repaste" => config.hotkeys.repaste = value.to_string(),
+        "hotkeys.consume_transcribe_key" => {
+            config.hotkeys.consume_transcribe_key =
+                value.parse().context("Expected 'true' or 'false'")?;
+        }
         "hotkeys.mode" => {
             config.hotkeys.mode = match value {
                 "toggle" => RecordingMode::Toggle,
@@ -262,6 +271,7 @@ fn set_config_value_at(path: &Path, key: &str, value: &str) -> Result<()> {
                 "history.path",
                 "history.save_cancelled",
                 "hotkeys.cancel",
+                "hotkeys.consume_transcribe_key",
                 "hotkeys.mode",
                 "hotkeys.repaste",
                 "hotkeys.transcribe",
@@ -313,6 +323,7 @@ mod tests {
         assert_eq!(cfg.hotkeys.transcribe, "RAlt");
         assert_eq!(cfg.hotkeys.cancel, "Escape");
         assert_eq!(cfg.hotkeys.mode, RecordingMode::Toggle);
+        assert!(!cfg.hotkeys.consume_transcribe_key);
         assert!(cfg.recording.device.is_empty());
         assert!(!cfg.recording.mute_system_audio);
         assert!(cfg.transcription.model_path.is_empty());
@@ -364,6 +375,7 @@ mod tests {
             transcribe = "F9"
             cancel = "F10"
             mode = "push_to_talk"
+            consume_transcribe_key = true
             [recording]
             device = "Blue Yeti"
             mute_system_audio = true
@@ -386,6 +398,7 @@ mod tests {
         assert_eq!(cfg.hotkeys.transcribe, "F9");
         assert_eq!(cfg.hotkeys.cancel, "F10");
         assert_eq!(cfg.hotkeys.mode, RecordingMode::PushToTalk);
+        assert!(cfg.hotkeys.consume_transcribe_key);
         assert_eq!(cfg.recording.device, "Blue Yeti");
         assert!(cfg.recording.mute_system_audio);
         assert_eq!(cfg.transcription.model_path, "C:/models/ggml-medium.bin");
@@ -492,10 +505,12 @@ mod tests {
         set_config_value_at(&path, "recording.mute_system_audio", "true").unwrap();
         set_config_value_at(&path, "paste.restore_clipboard", "false").unwrap();
         set_config_value_at(&path, "history.save_cancelled", "true").unwrap();
+        set_config_value_at(&path, "hotkeys.consume_transcribe_key", "true").unwrap();
         let cfg = load_config_from_path(&path).unwrap();
         assert!(cfg.recording.mute_system_audio);
         assert!(!cfg.paste.restore_clipboard);
         assert!(cfg.history.save_cancelled);
+        assert!(cfg.hotkeys.consume_transcribe_key);
     }
 
     // --- error cases ---

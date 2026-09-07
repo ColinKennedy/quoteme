@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rdev::{EventType, Key};
 use std::sync::mpsc::Sender;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HotkeyEvent {
@@ -72,13 +73,46 @@ pub fn parse_hotkey(s: &str) -> Result<Hotkey> {
 }
 
 fn modifiers_held(held: &[Key], hotkey: &Hotkey) -> bool {
-    hotkey.modifiers.iter().all(|m| held.contains(m))
+    // Match the complete modifier set. Without this, Ctrl+F10 also matches bare
+    // F10, so a repaste shortcut can unexpectedly toggle recording.
+    let held_modifiers: Vec<&Key> = held.iter().filter(|key| is_modifier(key)).collect();
+    held_modifiers.len() == hotkey.modifiers.len()
+        && hotkey
+            .modifiers
+            .iter()
+            .all(|modifier| held_modifiers.contains(&modifier))
+}
+
+fn is_modifier(key: &Key) -> bool {
+    matches!(
+        key,
+        Key::ControlLeft
+            | Key::ControlRight
+            | Key::ShiftLeft
+            | Key::ShiftRight
+            | Key::Alt
+            | Key::AltGr
+    )
+}
+
+/// Mutable state shared across `grab` callback invocations. `rdev::grab` requires a `Fn`
+/// (not `FnMut`) callback since it may be re-entered from the OS hook, so this is held
+/// behind a `Mutex` rather than captured by value.
+struct ListenerState {
+    /// Keys currently held down. Used to track modifier state and suppress auto-repeat.
+    held: Vec<Key>,
+    /// True between TranscribeDown and TranscribeUp so we don't emit spurious TranscribeUp
+    /// events when the trigger key is pressed without its required modifiers.
+    transcribe_active: bool,
+    /// True while the current transcribe keypress is being swallowed (consume_transcribe_key).
+    trigger_consumed: bool,
 }
 
 pub fn start_hotkey_listener(
     transcribe_key_str: String,
     cancel_key_str: String,
     repaste_key_str: Option<String>,
+    consume_transcribe_key: bool,
     tx: Sender<HotkeyEvent>,
 ) {
     std::thread::spawn(move || {
@@ -109,54 +143,78 @@ pub fn start_hotkey_listener(
             });
 
         tracing::debug!(
-            "Hotkey listener starting — transcribe={:?} cancel={:?} repaste={:?}",
+            "Hotkey listener starting — transcribe={:?} cancel={:?} repaste={:?} \
+             consume_transcribe_key={}",
             transcribe,
             cancel,
-            repaste
+            repaste,
+            consume_transcribe_key,
         );
 
-        // Keys currently held down. Used to track modifier state and suppress auto-repeat.
-        let mut held: Vec<Key> = Vec::new();
-        // True between TranscribeDown and TranscribeUp so we don't emit spurious TranscribeUp
-        // events when the trigger key is pressed without its required modifiers.
-        let mut transcribe_active = false;
+        let state = Mutex::new(ListenerState {
+            held: Vec::new(),
+            transcribe_active: false,
+            trigger_consumed: false,
+        });
 
-        if let Err(e) = rdev::listen(move |event: rdev::Event| {
+        let callback = move |event: rdev::Event| -> Option<rdev::Event> {
             match event.event_type {
                 EventType::KeyPress(key) => {
-                    tracing::trace!("KeyPress({:?}) held={:?}", key, held);
+                    let mut st = state.lock().expect("hotkey listener state mutex");
+                    tracing::trace!("KeyPress({:?}) held={:?}", key, st.held);
                     // Suppress duplicate events from OS key auto-repeat.
-                    let is_first_press = !held.contains(&key);
+                    let is_first_press = !st.held.contains(&key);
                     if is_first_press {
-                        held.push(key);
+                        st.held.push(key);
                     }
-                    if key == transcribe.trigger
-                        && is_first_press
-                        && modifiers_held(&held, &transcribe)
-                    {
-                        transcribe_active = true;
-                        let _ = tx.send(HotkeyEvent::TranscribeDown);
-                    }
-                    if key == cancel.trigger && is_first_press && modifiers_held(&held, &cancel) {
-                        let _ = tx.send(HotkeyEvent::Cancel);
-                    }
-                    if let Some(ref rp) = repaste {
-                        if key == rp.trigger && is_first_press && modifiers_held(&held, rp) {
-                            let _ = tx.send(HotkeyEvent::Repaste);
+
+                    if key == transcribe.trigger {
+                        if is_first_press && modifiers_held(&st.held, &transcribe) {
+                            st.transcribe_active = true;
+                            st.trigger_consumed = consume_transcribe_key;
+                            let _ = tx.send(HotkeyEvent::TranscribeDown);
+                        }
+                        if st.trigger_consumed {
+                            // Swallow the press (and any auto-repeats) so it isn't
+                            // also typed into the focused application.
+                            return None;
                         }
                     }
+                    if is_first_press && key == cancel.trigger && modifiers_held(&st.held, &cancel)
+                    {
+                        let _ = tx.send(HotkeyEvent::Cancel);
+                    }
+                    if is_first_press {
+                        if let Some(ref rp) = repaste {
+                            if key == rp.trigger && modifiers_held(&st.held, rp) {
+                                let _ = tx.send(HotkeyEvent::Repaste);
+                            }
+                        }
+                    }
+                    Some(event)
                 }
                 EventType::KeyRelease(key) => {
-                    tracing::trace!("KeyRelease({:?}) held={:?}", key, held);
-                    if key == transcribe.trigger && transcribe_active {
-                        transcribe_active = false;
+                    let mut st = state.lock().expect("hotkey listener state mutex");
+                    tracing::trace!("KeyRelease({:?}) held={:?}", key, st.held);
+                    let mut consumed = false;
+                    if key == transcribe.trigger && st.transcribe_active {
+                        st.transcribe_active = false;
+                        consumed = st.trigger_consumed;
+                        st.trigger_consumed = false;
                         let _ = tx.send(HotkeyEvent::TranscribeUp);
                     }
-                    held.retain(|k| k != &key);
+                    st.held.retain(|k| k != &key);
+                    if consumed {
+                        None
+                    } else {
+                        Some(event)
+                    }
                 }
-                _ => {}
+                _ => Some(event),
             }
-        }) {
+        };
+
+        if let Err(e) = rdev::grab(callback) {
             tracing::error!("Hotkey listener exited with error: {:?}", e);
         }
     });
@@ -422,10 +480,10 @@ mod tests {
     // ---- modifiers_held ----
 
     #[test]
-    fn modifiers_held_no_modifiers_always_true() {
+    fn modifiers_held_no_modifiers_rejects_modified_keypress() {
         let h = parse_hotkey("Space").unwrap();
         assert!(modifiers_held(&[], &h));
-        assert!(modifiers_held(&[Key::ControlLeft], &h));
+        assert!(!modifiers_held(&[Key::ControlLeft], &h));
     }
 
     #[test]
@@ -434,7 +492,7 @@ mod tests {
         assert!(!modifiers_held(&[], &h));
         assert!(!modifiers_held(&[Key::ShiftLeft], &h));
         assert!(modifiers_held(&[Key::ControlLeft], &h));
-        assert!(modifiers_held(&[Key::ControlLeft, Key::ShiftLeft], &h));
+        assert!(!modifiers_held(&[Key::ControlLeft, Key::ShiftLeft], &h));
     }
 
     #[test]

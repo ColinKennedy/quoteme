@@ -2,6 +2,12 @@
 
 A Windows Rust CLI that transcribes speech to text in the background using a local Whisper model.
 
+| <!-- --> | <!-- --> |
+| --- | --- |
+| CI/CD | [![CI](https://img.shields.io/github/actions/workflow/status/ColinKennedy/quoteme/ci.yml?branch=master&style=for-the-badge&label=CI)](https://github.com/ColinKennedy/quoteme/actions/workflows/ci.yml) |
+| License | [![License](https://img.shields.io/github/license/ColinKennedy/quoteme?style=for-the-badge)](https://github.com/ColinKennedy/quoteme) |
+| Social | [![RSS](https://img.shields.io/badge/rss-F88900?style=for-the-badge&logo=rss&logoColor=white)](https://github.com/ColinKennedy/quoteme/commits/master.atom) |
+
 Long recordings are transcribed incrementally in pause-delimited chunks while you speak. When you
 stop, only the unprocessed tail normally remains, so completion time does not grow with the full
 length of the recording.
@@ -80,6 +86,7 @@ quoteme configuration edit --run-with code
 | `hotkeys.transcribe` | `RAlt` | Key to start/stop recording |
 | `hotkeys.cancel` | `Escape` | Key to cancel recording |
 | `hotkeys.mode` | `toggle` | `toggle` or `push_to_talk` |
+| `hotkeys.consume_transcribe_key` | `false` | Swallow the transcribe key so it isn't also typed (e.g. Space, Tab) |
 | `recording.device` | *(default mic)* | Substring match against device name |
 | `recording.mute_system_audio` | `false` | Mute speakers while recording (Windows only) |
 | `recording.silence_timeout_secs` | `20` | Auto-stop after N seconds of silence; minimum 1 |
