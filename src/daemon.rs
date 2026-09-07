@@ -164,6 +164,26 @@ enum TranscriptionResult {
     },
 }
 
+/// Slow clipboard and history operations are serialized on a worker so they can
+/// never delay hotkey handling. History directories can contain thousands of
+/// recordings, and walking them on the daemon loop used to make key presses
+/// appear to do nothing until the walk completed.
+enum PostprocessCommand {
+    Done {
+        config: Config,
+        text: String,
+        audio: Vec<f32>,
+        duration: f64,
+    },
+    Cancelled {
+        config: Config,
+        audio: Vec<f32>,
+    },
+    Repaste {
+        config: Config,
+    },
+}
+
 struct ActiveRecording {
     stop_tx: std::sync::mpsc::SyncSender<RecordSignal>,
     result_rx: std::sync::mpsc::Receiver<RecordResult>,
@@ -203,11 +223,12 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
 
     tracing::info!(
         "Daemon started — transcribe={} cancel={} mode={:?} repaste={:?} \
-         model={:?} paste={:?} silence_timeout={}s",
+         consume_transcribe_key={} model={:?} paste={:?} silence_timeout={}s",
         config.hotkeys.transcribe,
         config.hotkeys.cancel,
         config.hotkeys.mode,
         config.hotkeys.repaste,
+        config.hotkeys.consume_transcribe_key,
         config.transcription.model_path,
         config.paste.method,
         config.recording.silence_timeout_secs,
@@ -232,16 +253,20 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
         config.transcription.unload_after_secs,
     )));
 
-    // Eagerly load the model so the first transcription doesn't pay the load cost.
+    // Pre-load in the background. Capturing audio does not need the model, so the
+    // hotkey listener and daemon loop should be responsive during a cold start.
     {
-        let mut eng = engine.lock().expect("engine mutex");
-        tracing::info!("Pre-loading Whisper model at daemon startup…");
-        if let Err(e) = eng.load() {
-            tracing::warn!(
-                "Model pre-load failed — daemon will retry on first transcription: {:#}",
-                e
-            );
-        }
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            let mut eng = engine.lock().expect("engine mutex");
+            tracing::info!("Pre-loading Whisper model at daemon startup…");
+            if let Err(e) = eng.load() {
+                tracing::warn!(
+                    "Model pre-load failed — daemon will retry on first transcription: {:#}",
+                    e
+                );
+            }
+        });
     }
 
     let (hotkey_tx, hotkey_rx) = std::sync::mpsc::channel::<HotkeyEvent>();
@@ -249,11 +274,15 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
         config.hotkeys.transcribe.clone(),
         config.hotkeys.cancel.clone(),
         Some(config.hotkeys.repaste.clone()).filter(|s| !s.is_empty()),
+        config.hotkeys.consume_transcribe_key,
         hotkey_tx,
     );
 
     let (transcription_tx, transcription_rx) = std::sync::mpsc::channel::<TranscriptionResult>();
+    let (postprocess_tx, postprocess_rx) = std::sync::mpsc::channel::<PostprocessCommand>();
+    spawn_postprocessor(postprocess_rx);
     let mut active: Option<ActiveRecording> = None;
+    let unload_in_progress = Arc::new(AtomicBool::new(false));
 
     // Tap-or-hold state: only active when repaste key == transcribe key in toggle mode.
     let repaste_shares_key = !config.hotkeys.repaste.is_empty()
@@ -279,6 +308,8 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                         if new_cfg.hotkeys.transcribe != config.hotkeys.transcribe
                             || new_cfg.hotkeys.cancel != config.hotkeys.cancel
                             || new_cfg.hotkeys.mode != config.hotkeys.mode
+                            || new_cfg.hotkeys.consume_transcribe_key
+                                != config.hotkeys.consume_transcribe_key
                         {
                             tracing::warn!(
                                 "Hotkey config changed — restart the daemon for hotkey changes to take effect"
@@ -367,9 +398,23 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
         }
 
         // ---- Unload model if idle ----
-        if let Ok(mut eng) = engine.try_lock() {
-            if eng.should_unload() {
-                eng.unload();
+        if !unload_in_progress.load(Ordering::Acquire) {
+            if let Ok(eng) = engine.try_lock() {
+                if eng.should_unload() {
+                    unload_in_progress.store(true, Ordering::Release);
+                    drop(eng);
+                    let engine = engine.clone();
+                    let unload_in_progress = unload_in_progress.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(mut eng) = engine.lock() {
+                            // Activity may have resumed between the check and lock.
+                            if eng.should_unload() {
+                                eng.unload();
+                            }
+                        }
+                        unload_in_progress.store(false, Ordering::Release);
+                    });
+                }
             }
         }
 
@@ -383,7 +428,10 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                 }
                 Ok(RecordResult::Cancelled { audio }) => {
                     active = None;
-                    handle_cancelled(&config, &audio);
+                    let _ = postprocess_tx.send(PostprocessCommand::Cancelled {
+                        config: config.clone(),
+                        audio,
+                    });
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     tracing::warn!("Recording thread disconnected unexpectedly");
@@ -400,7 +448,12 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                 audio,
                 duration,
             } = result;
-            handle_done(&config, &text, &audio, duration);
+            let _ = postprocess_tx.send(PostprocessCommand::Done {
+                config: config.clone(),
+                text,
+                audio,
+                duration,
+            });
         }
 
         // ---- Tap-or-hold: fire repaste when transcribe key held past threshold ----
@@ -408,7 +461,9 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
             if let Some(down_at) = key_down_at {
                 if down_at.elapsed() >= HOLD_THRESHOLD {
                     hold_repaste_fired = true;
-                    do_repaste(&config);
+                    let _ = postprocess_tx.send(PostprocessCommand::Repaste {
+                        config: config.clone(),
+                    });
                 }
             }
         }
@@ -485,13 +540,47 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
                 }
                 HotkeyEvent::Repaste => {
                     tracing::debug!("Hotkey: Repaste");
-                    do_repaste(&config);
+                    let _ = postprocess_tx.send(PostprocessCommand::Repaste {
+                        config: config.clone(),
+                    });
                 }
             }
         }
 
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn spawn_postprocessor(rx: std::sync::mpsc::Receiver<PostprocessCommand>) {
+    std::thread::spawn(move || {
+        while let Ok(command) = rx.recv() {
+            let started = Instant::now();
+            match command {
+                PostprocessCommand::Done {
+                    config,
+                    text,
+                    audio,
+                    duration,
+                } => handle_done(&config, &text, &audio, duration),
+                PostprocessCommand::Cancelled { config, audio } => {
+                    handle_cancelled(&config, &audio)
+                }
+                PostprocessCommand::Repaste { config } => do_repaste(&config),
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= Duration::from_secs(1) {
+                tracing::warn!(
+                    "Background paste/history processing took {:.2}s",
+                    elapsed.as_secs_f64()
+                );
+            } else {
+                tracing::debug!(
+                    "Background paste/history processing finished in {:.3}s",
+                    elapsed.as_secs_f64()
+                );
+            }
+        }
+    });
 }
 
 fn spawn_recording(

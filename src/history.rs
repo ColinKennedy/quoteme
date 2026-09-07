@@ -85,6 +85,12 @@ pub fn list_entries(config: &HistoryConfig) -> Result<Vec<HistoryEntry>> {
 }
 
 pub fn cleanup(config: &HistoryConfig) -> Result<()> {
+    // Both zero means unlimited retention. Avoid an otherwise pointless scan of
+    // every metadata file; large histories can make that scan take many seconds.
+    if config.max_age_days == 0 && config.max_recordings == 0 {
+        return Ok(());
+    }
+
     let dir = history_dir(config);
     if !dir.exists() {
         return Ok(());
@@ -221,6 +227,21 @@ mod tests {
             ..HistoryConfig::default()
         };
         assert!(list_entries(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cleanup_with_unlimited_retention_does_not_scan_history() {
+        let tmp = TempDir::new().unwrap();
+        let history_path = tmp.path().join("history-is-a-file");
+        std::fs::write(&history_path, "not a directory").unwrap();
+        let c = HistoryConfig {
+            path: history_path.to_str().unwrap().to_string(),
+            max_recordings: 0,
+            max_age_days: 0,
+            save_cancelled: false,
+        };
+
+        assert!(cleanup(&c).is_ok());
     }
 
     #[test]

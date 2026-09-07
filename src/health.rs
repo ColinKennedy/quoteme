@@ -204,6 +204,7 @@ mod tests {
             cancel: "Escape".to_string(),
             repaste: "Escape".to_string(),
             mode: RecordingMode::Toggle,
+            consume_transcribe_key: false,
         };
         let r = check_repaste_hotkey(&hotkeys);
         assert!(matches!(r.status, Status::Fail));
@@ -217,6 +218,7 @@ mod tests {
             cancel: "escape".to_string(),
             repaste: "ESCAPE".to_string(),
             mode: RecordingMode::Toggle,
+            consume_transcribe_key: false,
         };
         let r = check_repaste_hotkey(&hotkeys);
         assert!(matches!(r.status, Status::Fail));
@@ -229,6 +231,7 @@ mod tests {
             cancel: "Escape".to_string(),
             repaste: "RAlt".to_string(),
             mode: RecordingMode::PushToTalk,
+            consume_transcribe_key: false,
         };
         let r = check_repaste_hotkey(&hotkeys);
         assert!(matches!(r.status, Status::Fail));
@@ -242,6 +245,7 @@ mod tests {
             cancel: "Escape".to_string(),
             repaste: "RAlt".to_string(),
             mode: RecordingMode::Toggle,
+            consume_transcribe_key: false,
         };
         let r = check_repaste_hotkey(&hotkeys);
         assert!(r.is_ok(), "same key in toggle mode should be OK (tap/hold)");
@@ -255,6 +259,7 @@ mod tests {
             cancel: "Escape".to_string(),
             repaste: "F9".to_string(),
             mode: RecordingMode::Toggle,
+            consume_transcribe_key: false,
         };
         let r = check_repaste_hotkey(&hotkeys);
         assert!(r.is_ok());

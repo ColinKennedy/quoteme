@@ -300,21 +300,59 @@ impl StreamingTranscriber {
     ) -> Result<String> {
         if self.failed {
             tracing::warn!("A streaming chunk failed; retrying the full recording");
-            return engine.transcribe(
+            let recovery = engine.transcribe(
                 full_audio,
                 &self.language,
                 (!self.base_prompt.is_empty()).then_some(self.base_prompt.as_str()),
             );
+            return prefer_recovery_or_committed(self.text, recovery);
         }
 
         if tail.len() >= MIN_FINAL_NEW_SAMPLES || self.completed_chunks == 0 {
-            self.push_chunk(engine, tail)?;
+            if let Err(error) = self.push_chunk(engine, tail) {
+                tracing::warn!(
+                    "Final streaming tail failed ({:#}); retrying the full recording",
+                    error
+                );
+                let recovery = engine.transcribe(
+                    full_audio,
+                    &self.language,
+                    (!self.base_prompt.is_empty()).then_some(self.base_prompt.as_str()),
+                );
+                return prefer_recovery_or_committed(self.text, recovery);
+            }
         }
         Ok(self.text)
     }
 
     fn context_prompt(&self) -> Option<String> {
         (!self.base_prompt.is_empty()).then(|| self.base_prompt.clone())
+    }
+}
+
+/// Prefer a full-context recovery, but never throw away text from chunks that
+/// were already transcribed successfully. A weak or silent final tail must not
+/// turn an otherwise useful recording into an empty result.
+fn prefer_recovery_or_committed(committed: String, recovery: Result<String>) -> Result<String> {
+    match recovery {
+        Ok(recovered) if !recovered.trim().is_empty() => Ok(recovered),
+        Ok(_) if !committed.trim().is_empty() => {
+            tracing::warn!(
+                "Full-recording recovery was empty; preserving {} committed characters",
+                committed.len()
+            );
+            Ok(committed)
+        }
+        Ok(recovered) => Ok(recovered),
+        Err(error) if !committed.trim().is_empty() => {
+            tracing::warn!(
+                "Full-recording recovery failed ({:#}); preserving {} committed characters",
+                error,
+                committed.len()
+            );
+            Ok(committed)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -504,6 +542,32 @@ mod tests {
     #[test]
     fn transcript_append_adds_one_space() {
         assert_eq!(append_transcript("hello ", " world"), "hello world");
+    }
+
+    #[test]
+    fn failed_recovery_preserves_committed_text() {
+        let result = prefer_recovery_or_committed(
+            "already transcribed".to_string(),
+            Err(anyhow::anyhow!("recovery failed")),
+        )
+        .unwrap();
+        assert_eq!(result, "already transcribed");
+    }
+
+    #[test]
+    fn empty_recovery_preserves_committed_text() {
+        let result =
+            prefer_recovery_or_committed("already transcribed".to_string(), Ok(String::new()))
+                .unwrap();
+        assert_eq!(result, "already transcribed");
+    }
+
+    #[test]
+    fn successful_recovery_replaces_committed_text() {
+        let result =
+            prefer_recovery_or_committed("partial".to_string(), Ok("full recording".to_string()))
+                .unwrap();
+        assert_eq!(result, "full recording");
     }
 
     #[test]
