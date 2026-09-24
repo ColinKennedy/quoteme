@@ -14,6 +14,7 @@ use crate::transcription::{
     load_word_list, StreamingTranscriber, TranscriptionEngine, STREAM_CHUNK_SAMPLES,
     STREAM_MIN_CHUNK_SAMPLES,
 };
+use crate::vad;
 
 // ---------------------------------------------------------------------------
 // PID file helpers
@@ -553,6 +554,12 @@ pub fn run_daemon(mut config: Config) -> Result<()> {
 
 fn spawn_postprocessor(rx: std::sync::mpsc::Receiver<PostprocessCommand>) {
     std::thread::spawn(move || {
+        // Repaste normally targets a transcription completed by this daemon
+        // session. Keep it in memory: resolving it by walking an unlimited
+        // history can take tens of seconds and, because this worker also owns
+        // normal pastes, used to hold newly completed transcriptions behind
+        // that scan.
+        let mut latest_text: Option<String> = None;
         while let Ok(command) = rx.recv() {
             let started = Instant::now();
             match command {
@@ -561,11 +568,36 @@ fn spawn_postprocessor(rx: std::sync::mpsc::Receiver<PostprocessCommand>) {
                     text,
                     audio,
                     duration,
-                } => handle_done(&config, &text, &audio, duration),
+                } => {
+                    let text = finalized_text(&text, &audio, duration);
+                    if !text.is_empty() {
+                        latest_text = Some(text.to_string());
+                    }
+                    handle_done(&config, text, &audio, duration);
+                }
                 PostprocessCommand::Cancelled { config, audio } => {
                     handle_cancelled(&config, &audio)
                 }
-                PostprocessCommand::Repaste { config } => do_repaste(&config),
+                PostprocessCommand::Repaste { config } => {
+                    if let Some(text) = latest_text.as_deref() {
+                        tracing::info!(
+                            "Repasting last transcription from memory ({} chars)",
+                            text.len()
+                        );
+                        if let Err(e) = paste::paste_text(
+                            text,
+                            &config.paste.method,
+                            config.paste.restore_clipboard,
+                        ) {
+                            tracing::error!("Repaste failed: {:#}", e);
+                        }
+                    } else {
+                        // Preserve repaste-after-restart behavior. Once a new
+                        // transcription completes, this slow fallback is no
+                        // longer used for the lifetime of the daemon.
+                        do_repaste(&config);
+                    }
+                }
             }
             let elapsed = started.elapsed();
             if elapsed >= Duration::from_secs(1) {
@@ -864,7 +896,26 @@ fn do_repaste(config: &Config) {
     }
 }
 
+/// Pasted in place of an empty transcript when the recording had no signal
+/// at all (e.g. a muted or disconnected input device), so the user gets
+/// visible feedback instead of the hotkey silently appearing to do nothing.
+const BLANK_AUDIO_PLACEHOLDER: &str = "[BLANK_AUDIO]";
+
+fn finalized_text<'a>(text: &'a str, audio: &[f32], duration: f64) -> &'a str {
+    if text.is_empty() && vad::is_true_silence(audio) {
+        tracing::warn!(
+            "Recording had no signal at all ({:.1}s) — input device may be muted or disconnected",
+            duration
+        );
+        BLANK_AUDIO_PLACEHOLDER
+    } else {
+        text
+    }
+}
+
 fn handle_done(config: &Config, text: &str, audio: &[f32], duration: f64) {
+    let text = finalized_text(text, audio, duration);
+
     if !text.is_empty() {
         if let Err(e) =
             paste::paste_text(text, &config.paste.method, config.paste.restore_clipboard)
@@ -939,6 +990,35 @@ mod tests {
         assert_eq!(entries[0].text, "hello world");
         assert!((entries[0].duration_secs - 1.5).abs() < 1e-6);
         assert!(!entries[0].cancelled);
+    }
+
+    #[test]
+    fn handle_done_all_zero_audio_saves_blank_audio_placeholder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(&tmp);
+        let muted_audio = vec![0.0_f32; 16_000 * 2];
+        handle_done(&cfg, "", &muted_audio, 2.0);
+        let entries = crate::history::list_entries(&cfg.history).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "a fully-silent recording should still surface feedback"
+        );
+        assert_eq!(entries[0].text, BLANK_AUDIO_PLACEHOLDER);
+    }
+
+    #[test]
+    fn handle_done_quiet_but_nonzero_audio_stays_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = test_config(&tmp);
+        // Ambient self-noise, not exact digital silence — ordinary "nothing
+        // was said" case, which should stay silent rather than paste a
+        // placeholder.
+        let quiet_audio = vec![0.0001_f32; 16_000 * 2];
+        handle_done(&cfg, "", &quiet_audio, 2.0);
+        assert!(crate::history::list_entries(&cfg.history)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
