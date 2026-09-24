@@ -22,6 +22,31 @@ fn rms(samples: &[f32]) -> f32 {
     (sum_sq / samples.len() as f32).sqrt()
 }
 
+/// True when the entire buffer has no detectable speech energy anywhere in
+/// it. Unlike `filter_silence`, this makes no assumption about *where*
+/// silence falls, so it's safe to use on streaming chunks that may begin
+/// mid-speech. Intended as a gate to skip Whisper inference outright —
+/// Whisper has a tendency to hallucinate tokens like `[BLANK_AUDIO]` when
+/// given audio with nothing in it to transcribe.
+pub fn is_effectively_silent(audio: &[f32]) -> bool {
+    audio.is_empty() || rms(audio) <= MIN_THRESHOLD
+}
+
+// A real open microphone — even pointed at a silent room — has some
+// non-zero self-noise from the ADC. Samples this close to exact zero across
+// an entire recording mean no signal ever reached the input device at all,
+// not just that nothing was said.
+const TRUE_SILENCE_MAX_AMPLITUDE: f32 = 1e-6;
+
+/// True when a full recording has no signal anywhere in it — e.g. the input
+/// device was muted or disconnected for the whole take. Much stricter than
+/// `is_effectively_silent`, which only means "no speech"; this means
+/// "nothing was ever captured," which is worth surfacing to the user rather
+/// than silently discarding like ordinary silence.
+pub fn is_true_silence(audio: &[f32]) -> bool {
+    !audio.is_empty() && audio.iter().all(|&s| s.abs() <= TRUE_SILENCE_MAX_AMPLITUDE)
+}
+
 /// Strip non-speech frames from audio before Whisper inference.
 ///
 /// Uses an adaptive RMS energy threshold: noise floor is estimated from the
@@ -163,6 +188,49 @@ mod tests {
                 "hangover samples must come from the silent tail"
             );
         }
+    }
+
+    #[test]
+    fn true_silence_detects_all_zero_audio() {
+        let audio = vec![0.0_f32; 16_000 * 3];
+        assert!(is_true_silence(&audio));
+    }
+
+    #[test]
+    fn true_silence_false_for_empty() {
+        assert!(!is_true_silence(&[]));
+    }
+
+    #[test]
+    fn true_silence_false_for_ambient_noise() {
+        // Ambient self-noise (well above the exact-zero epsilon) should NOT
+        // count as "true" silence, even though it's quiet enough that
+        // `is_effectively_silent` would treat it as no-speech.
+        let audio = build_audio(&[(0.0001, 32)]);
+        assert!(!is_true_silence(&audio));
+    }
+
+    #[test]
+    fn true_silence_false_when_any_speech_present() {
+        let audio = build_audio(&[(0.0, 20), (0.5, 3), (0.0, 20)]);
+        assert!(!is_true_silence(&audio));
+    }
+
+    #[test]
+    fn effectively_silent_true_for_empty() {
+        assert!(is_effectively_silent(&[]));
+    }
+
+    #[test]
+    fn effectively_silent_true_for_quiet_audio() {
+        let audio = build_audio(&[(0.0001, 20)]);
+        assert!(is_effectively_silent(&audio));
+    }
+
+    #[test]
+    fn effectively_silent_false_when_speech_present() {
+        let audio = build_audio(&[(0.0001, 20), (0.5, 3), (0.0001, 20)]);
+        assert!(!is_effectively_silent(&audio));
     }
 
     #[test]

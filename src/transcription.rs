@@ -164,6 +164,18 @@ impl TranscriptionEngine {
         };
         let audio_secs = audio.len() as f64 / 16_000.0;
 
+        // Whisper tends to hallucinate tokens like "[BLANK_AUDIO]" when given
+        // audio with no speech energy anywhere in it (e.g. a silent trailing
+        // chunk that streaming skips VAD-trimming for). Skip inference
+        // entirely rather than let it invent text for nothing.
+        if vad::is_effectively_silent(audio) {
+            tracing::debug!(
+                "Skipping inference: {:.2}s of audio has no detectable speech energy",
+                audio_secs
+            );
+            return Ok(String::new());
+        }
+
         let ctx = self.ctx.as_ref().unwrap();
         tracing::debug!("Creating Whisper state…");
         let state_start = Instant::now();
@@ -221,7 +233,7 @@ impl TranscriptionEngine {
                     .context("Failed to get segment text")?,
             );
         }
-        let text = text.trim().to_string();
+        let text = strip_non_speech_tags(text.trim());
         tracing::debug!(
             "Transcription result: {:?} ({} chars, {} segments)",
             text,
@@ -363,6 +375,79 @@ fn implausibly_sparse(audio: &[f32], text: &str) -> bool {
     }
     let non_whitespace_chars = text.chars().filter(|c| !c.is_whitespace()).count();
     non_whitespace_chars as f64 / audio_secs < 2.0
+}
+
+/// Bracketed/parenthesized annotations Whisper emits in place of real
+/// transcription when it has no speech to work with (e.g. "[BLANK_AUDIO]",
+/// "(silence)"). Word order inside the brackets/parens doesn't matter here —
+/// only the normalized set of words does.
+const NON_SPEECH_MARKERS: &[&str] = &[
+    "blank audio",
+    "silence",
+    "no speech",
+    "inaudible",
+    "music",
+    "applause",
+    "laughter",
+    "background noise",
+    "noise",
+];
+
+fn is_non_speech_marker(inner: &str) -> bool {
+    let normalized: String = inner
+        .chars()
+        .map(|c| {
+            if c == '_' {
+                ' '
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    let normalized: String = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    NON_SPEECH_MARKERS.contains(&normalized.as_str())
+}
+
+/// Remove non-speech annotations Whisper sometimes hallucinates for silent
+/// or near-silent audio that the energy gate in `transcribe_impl` didn't
+/// catch (e.g. a chunk mixing real speech with a silent stretch).
+fn strip_non_speech_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut removed_any = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let (open, close) = match c {
+            '[' => ('[', ']'),
+            '(' => ('(', ')'),
+            _ => {
+                out.push(c);
+                continue;
+            }
+        };
+        let mut inner = String::new();
+        let mut closed = false;
+        for c2 in chars.by_ref() {
+            if c2 == close {
+                closed = true;
+                break;
+            }
+            inner.push(c2);
+        }
+        if closed && is_non_speech_marker(&inner) {
+            removed_any = true;
+        } else {
+            out.push(open);
+            out.push_str(&inner);
+            if closed {
+                out.push(close);
+            }
+        }
+    }
+    if removed_any {
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        text.to_string()
+    }
 }
 
 fn append_transcript(existing: &str, next: &str) -> String {
@@ -568,6 +653,43 @@ mod tests {
             prefer_recovery_or_committed("partial".to_string(), Ok("full recording".to_string()))
                 .unwrap();
         assert_eq!(result, "full recording");
+    }
+
+    // ---- strip_non_speech_tags ----
+
+    #[test]
+    fn strips_blank_audio_tag() {
+        assert_eq!(strip_non_speech_tags("[BLANK_AUDIO]"), "");
+    }
+
+    #[test]
+    fn strips_silence_tag_case_insensitive_and_parens() {
+        assert_eq!(strip_non_speech_tags("(Silence)"), "");
+        assert_eq!(strip_non_speech_tags("[ silence ]"), "");
+    }
+
+    #[test]
+    fn strips_tag_while_preserving_surrounding_speech() {
+        assert_eq!(
+            strip_non_speech_tags("Hello there. [BLANK_AUDIO] How are you?"),
+            "Hello there. How are you?"
+        );
+    }
+
+    #[test]
+    fn leaves_ordinary_parenthetical_text_untouched() {
+        assert_eq!(
+            strip_non_speech_tags("please call me (John) tomorrow"),
+            "please call me (John) tomorrow"
+        );
+    }
+
+    #[test]
+    fn leaves_text_without_brackets_untouched() {
+        assert_eq!(
+            strip_non_speech_tags("just a normal sentence"),
+            "just a normal sentence"
+        );
     }
 
     #[test]
