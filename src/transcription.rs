@@ -782,7 +782,10 @@ mod tests {
     #[test]
     fn streaming_context_includes_word_list_and_committed_text() {
         let mut streaming = StreamingTranscriber::new("en".into(), "claudectl, claude.".into());
-        assert_eq!(streaming.context_prompt().as_deref(), Some("claudectl, claude."));
+        assert_eq!(
+            streaming.context_prompt().as_deref(),
+            Some("claudectl, claude.")
+        );
         streaming.text = "while a feeder...".into();
         assert_eq!(
             streaming.context_prompt().as_deref(),
@@ -942,4 +945,3 @@ mod tests {
         assert!(!implausibly_sparse(&vec![0.1; 5 * 16_000], "Hi"));
     }
 }
-
