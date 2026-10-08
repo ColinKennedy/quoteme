@@ -10,6 +10,16 @@ pub const STREAM_MIN_CHUNK_SAMPLES: usize = 25 * 16_000;
 /// Never let uncommitted audio grow beyond this duration.
 pub const STREAM_CHUNK_SAMPLES: usize = 30 * 16_000;
 const MIN_FINAL_NEW_SAMPLES: usize = 250 * 16;
+/// Whisper.cpp occasionally emits an early end-of-text token on longer
+/// chunks (typically right after a filler word or brief pause) and simply
+/// stops, silently dropping the rest of the audio it was given. If the last
+/// segment's end timestamp falls this far short of the audio's actual
+/// length, treat it as a truncation and retranscribe the missing tail.
+const TRUNCATION_GAP_SAMPLES: usize = 24_000; // 1.5s at 16kHz
+const MAX_TRUNCATION_RETRIES: u32 = 3;
+/// How much previously committed transcript to feed each streaming chunk as
+/// context, on top of the word list. Whisper's own prompt budget is ~224 tokens.
+const STREAM_CONTEXT_CHARS: usize = 200;
 
 pub struct TranscriptionEngine {
     ctx: Option<WhisperContext>,
@@ -138,6 +148,23 @@ impl TranscriptionEngine {
         initial_prompt: Option<&str>,
         apply_vad: bool,
     ) -> Result<String> {
+        self.transcribe_impl_inner(
+            audio,
+            language,
+            initial_prompt,
+            apply_vad,
+            MAX_TRUNCATION_RETRIES,
+        )
+    }
+
+    fn transcribe_impl_inner(
+        &mut self,
+        audio: &[f32],
+        language: &str,
+        initial_prompt: Option<&str>,
+        apply_vad: bool,
+        retries_left: u32,
+    ) -> Result<String> {
         let audio_secs = audio.len() as f64 / 16_000.0;
         tracing::debug!(
             "Transcription request: {} samples ({:.2}s audio), language={:?}, prompt_chars={}",
@@ -234,12 +261,71 @@ impl TranscriptionEngine {
             );
         }
         let text = strip_non_speech_tags(text.trim());
+        let text = if prompt_owned.is_empty() {
+            text
+        } else {
+            strip_leading_prompt_artifact(&text)
+        };
         tracing::debug!(
             "Transcription result: {:?} ({} chars, {} segments)",
             text,
             text.len(),
             n,
         );
+
+        if !prompt_owned.is_empty() && echoes_prompt(&text, &prompt_owned) {
+            drop(state);
+            tracing::warn!(
+                "Whisper echoed the initial prompt instead of transcribing {:.1}s of audio; \
+                 retrying without a prompt",
+                audio_secs,
+            );
+            return self.transcribe_impl_inner(audio, language, None, false, retries_left);
+        }
+
+        let gap_samples = if n > 0 {
+            let last_t1 = state
+                .full_get_segment_t1(n - 1)
+                .context("Failed to get last segment timestamp")?;
+            truncation_gap_samples(audio.len(), last_t1)
+        } else {
+            0
+        };
+        // `state` holds an immutable borrow of `self.ctx` (via `ctx`) for its
+        // whole lifetime (it has a Drop impl, so NLL can't shorten this).
+        // Drop it explicitly so the retry below can re-borrow `self` mutably.
+        drop(state);
+
+        if retries_left > 0 && gap_samples >= TRUNCATION_GAP_SAMPLES {
+            let covered_samples = audio.len() - gap_samples;
+            let remainder = &audio[covered_samples..];
+            if !vad::is_effectively_silent(remainder) {
+                tracing::warn!(
+                    "Whisper stopped {:.1}s before the end of {:.1}s of audio; retranscribing the tail",
+                    gap_samples as f64 / 16_000.0,
+                    audio_secs,
+                );
+                match self.transcribe_impl_inner(
+                    remainder,
+                    language,
+                    initial_prompt,
+                    false,
+                    retries_left - 1,
+                ) {
+                    Ok(tail_text) if !tail_text.trim().is_empty() => {
+                        return Ok(append_transcript(&text, &tail_text));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            "Retry to recover truncated tail failed ({:#}); keeping the partial result",
+                            error
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(text)
     }
 }
@@ -337,8 +423,13 @@ impl StreamingTranscriber {
         Ok(self.text)
     }
 
+    /// Word list plus the tail of the committed transcript. Chunks usually
+    /// start mid-sentence; without the preceding text as context, Whisper
+    /// conditions on the word list alone and tends to truncate the chunk or
+    /// echo the prompt back instead of transcribing it.
     fn context_prompt(&self) -> Option<String> {
-        (!self.base_prompt.is_empty()).then(|| self.base_prompt.clone())
+        let prompt = append_transcript(&self.base_prompt, transcript_tail(&self.text));
+        (!prompt.is_empty()).then_some(prompt)
     }
 }
 
@@ -366,6 +457,43 @@ fn prefer_recovery_or_committed(committed: String, recovery: Result<String>) -> 
         }
         Err(error) => Err(error),
     }
+}
+
+/// Samples of `audio` left uncovered by Whisper's last emitted segment.
+/// `last_segment_t1_centisec` is the end timestamp of the final segment, in
+/// whisper.cpp's native 10ms units.
+fn truncation_gap_samples(audio_len: usize, last_segment_t1_centisec: i64) -> usize {
+    let covered_samples = ((last_segment_t1_centisec.max(0) as f64 / 100.0) * 16_000.0) as usize;
+    audio_len.saturating_sub(covered_samples)
+}
+
+/// The last ~`STREAM_CONTEXT_CHARS` characters of `text`, starting on a word
+/// boundary so the prompt never opens with a word fragment.
+fn transcript_tail(text: &str) -> &str {
+    let text = text.trim();
+    let Some((start, _)) = text.char_indices().rev().nth(STREAM_CONTEXT_CHARS - 1) else {
+        return text;
+    };
+    let tail = &text[start..];
+    if text[..start].ends_with(char::is_whitespace) {
+        return tail;
+    }
+    tail.split_once(char::is_whitespace)
+        .map_or("", |(_, rest)| rest.trim_start())
+}
+
+/// True when every word Whisper produced already appears in the prompt — the
+/// signature of the model regurgitating its conditioning text rather than
+/// transcribing the audio.
+fn echoes_prompt(text: &str, prompt: &str) -> bool {
+    fn words(s: &str) -> impl Iterator<Item = String> + '_ {
+        s.split(|c: char| !c.is_alphanumeric() && c != '\'')
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+    }
+    let prompt_words: std::collections::HashSet<String> = words(prompt).collect();
+    let mut text_words = words(text).peekable();
+    text_words.peek().is_some() && text_words.all(|w| prompt_words.contains(&w))
 }
 
 fn implausibly_sparse(audio: &[f32], text: &str) -> bool {
@@ -450,6 +578,20 @@ fn strip_non_speech_tags(text: &str) -> String {
     }
 }
 
+/// When `initial_prompt` is set, whisper.cpp occasionally opens the
+/// transcript with a stray comma or period — an artifact of conditioning
+/// generation on text that immediately precedes the audio (see
+/// `load_word_list`'s comment). No real utterance legitimately starts with
+/// a bare comma or period, so it's safe to drop.
+fn strip_leading_prompt_artifact(text: &str) -> String {
+    let trimmed = text.trim_start();
+    let mut chars = trimmed.chars();
+    match chars.next() {
+        Some(',') | Some('.') => chars.as_str().trim_start().to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
 fn append_transcript(existing: &str, next: &str) -> String {
     let left = existing.trim();
     let right = next.trim();
@@ -478,7 +620,17 @@ pub fn load_word_list(path: &str) -> Result<String> {
         .map(|w| w.trim())
         .filter(|w| !w.is_empty())
         .collect();
-    Ok(words.join(", "))
+    if words.is_empty() {
+        return Ok(String::new());
+    }
+    // whisper.cpp conditions generation on `initial_prompt` as if it were
+    // transcript text immediately preceding the audio. An unterminated list
+    // ("claudectl, claude") reads as mid-enumeration, so the model "continues
+    // the list" with a stray leading comma; the closing period prevents that.
+    // Keep it a bare list, though: instruction-like phrasing ("The following
+    // words may appear: ...") is something the model treats as speech and
+    // regurgitates in place of the real transcript.
+    Ok(format!("{}.", words.join(", ")))
 }
 
 #[cfg(test)]
@@ -571,7 +723,7 @@ mod tests {
         std::fs::write(&path, "hello\nworld\nrust").unwrap();
         assert_eq!(
             load_word_list(path.to_str().unwrap()).unwrap(),
-            "hello, world, rust"
+            "hello, world, rust."
         );
     }
 
@@ -582,7 +734,7 @@ mod tests {
         std::fs::write(&path, "foo, bar,baz\nqux").unwrap();
         assert_eq!(
             load_word_list(path.to_str().unwrap()).unwrap(),
-            "foo, bar, baz, qux"
+            "foo, bar, baz, qux."
         );
     }
 
@@ -593,7 +745,7 @@ mod tests {
         std::fs::write(&path, "  hello  \n  world  ").unwrap();
         assert_eq!(
             load_word_list(path.to_str().unwrap()).unwrap(),
-            "hello, world"
+            "hello, world."
         );
     }
 
@@ -604,8 +756,43 @@ mod tests {
         std::fs::write(&path, "hello\n\nworld\n\n").unwrap();
         assert_eq!(
             load_word_list(path.to_str().unwrap()).unwrap(),
-            "hello, world"
+            "hello, world."
         );
+    }
+
+    #[test]
+    fn prompt_echo_is_detected() {
+        let prompt = "claudectl, claude. while a feeder...";
+        assert!(echoes_prompt("claudectl, claude.", prompt));
+        assert!(echoes_prompt("Claude", prompt));
+        assert!(!echoes_prompt("feedback is being applied", prompt));
+        assert!(!echoes_prompt("", prompt));
+    }
+
+    #[test]
+    fn transcript_tail_starts_on_word_boundary() {
+        assert_eq!(transcript_tail("  short text "), "short text");
+        let long = format!("{} tail words", "abcdefghij ".repeat(30));
+        let tail = transcript_tail(&long);
+        assert!(tail.len() <= STREAM_CONTEXT_CHARS);
+        assert!(tail.starts_with("abcdefghij"));
+        assert!(tail.ends_with("tail words"));
+    }
+
+    #[test]
+    fn streaming_context_includes_word_list_and_committed_text() {
+        let mut streaming = StreamingTranscriber::new("en".into(), "claudectl, claude.".into());
+        assert_eq!(
+            streaming.context_prompt().as_deref(),
+            Some("claudectl, claude.")
+        );
+        streaming.text = "while a feeder...".into();
+        assert_eq!(
+            streaming.context_prompt().as_deref(),
+            Some("claudectl, claude. while a feeder...")
+        );
+        let empty = StreamingTranscriber::new("en".into(), String::new());
+        assert_eq!(empty.context_prompt(), None);
     }
 
     #[test]
@@ -613,7 +800,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("words.txt");
         std::fs::write(&path, "Anthropic").unwrap();
-        assert_eq!(load_word_list(path.to_str().unwrap()).unwrap(), "Anthropic");
+        assert_eq!(
+            load_word_list(path.to_str().unwrap()).unwrap(),
+            "Anthropic."
+        );
     }
 
     #[test]
@@ -690,6 +880,53 @@ mod tests {
             strip_non_speech_tags("just a normal sentence"),
             "just a normal sentence"
         );
+    }
+
+    // ---- strip_leading_prompt_artifact ----
+
+    #[test]
+    fn strips_leading_comma_artifact() {
+        assert_eq!(
+            strip_leading_prompt_artifact(", I'm not sure exactly what..."),
+            "I'm not sure exactly what..."
+        );
+    }
+
+    #[test]
+    fn strips_leading_period_artifact() {
+        assert_eq!(
+            strip_leading_prompt_artifact(". So this isn't about caching necessarily"),
+            "So this isn't about caching necessarily"
+        );
+    }
+
+    #[test]
+    fn leaves_normal_text_untouched() {
+        assert_eq!(
+            strip_leading_prompt_artifact("Hello, how are you?"),
+            "Hello, how are you?"
+        );
+    }
+
+    // ---- truncation_gap_samples ----
+
+    #[test]
+    fn truncation_gap_zero_when_segment_reaches_audio_end() {
+        // 10s of audio, last segment ends at t1=1000 (centiseconds) == 10.0s.
+        assert_eq!(truncation_gap_samples(10 * 16_000, 1000), 0);
+    }
+
+    #[test]
+    fn truncation_gap_detects_early_stop() {
+        // 30s of audio, but the last segment ends at 25s — a 5s gap.
+        let gap = truncation_gap_samples(30 * 16_000, 2500);
+        assert_eq!(gap, 5 * 16_000);
+    }
+
+    #[test]
+    fn truncation_gap_clamps_when_segment_overruns_audio() {
+        // Rounding/hangover can put t1 slightly past the buffer end; must not underflow.
+        assert_eq!(truncation_gap_samples(1_000, 1000), 0);
     }
 
     #[test]
