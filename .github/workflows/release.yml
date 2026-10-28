@@ -55,7 +55,8 @@ jobs:
   build-cuda:
     name: Build quoteme-cuda (CUDA)
     needs: verify-tag
-    runs-on: windows-latest
+    # Pinned: windows-latest has VS 2026, whose MSVC is too new for nvcc. Needs VS 2022.
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -66,17 +67,17 @@ jobs:
         id: cuda
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda: "12.6.2"
+          cuda: "12.8.1"
           method: network
           sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration", "thrust"]'
       # The VS generator can't find the CUDA MSBuild integration on hosted runners,
       # so use Ninja + cl.exe, which only need nvcc.
       - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vsversion: 2022
       - name: Build
         env:
           CMAKE_GENERATOR: Ninja
-          # Hosted runners ship an MSVC newer than CUDA 12.6 officially supports.
-          CUDAFLAGS: -allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
         run: cargo build --locked --release --features cuda --bin quoteme-cuda
       - name: Package (bundle CUDA runtime DLLs)
         shell: bash
