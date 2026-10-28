@@ -74,7 +74,7 @@ jobs:
       # so use Ninja + cl.exe, which only need nvcc.
       - uses: ilammy/msvc-dev-cmd@v1
         with:
-          vsversion: 2022
+          vsversion: "[17.0,18.0)"
       - name: Build
         env:
           CMAKE_GENERATOR: Ninja
