@@ -75,6 +75,8 @@ jobs:
       - name: Build
         env:
           CMAKE_GENERATOR: Ninja
+          # Hosted runners ship an MSVC newer than CUDA 12.6 officially supports.
+          CUDAFLAGS: -allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
         run: cargo build --locked --release --features cuda --bin quoteme-cuda
       - name: Package (bundle CUDA runtime DLLs)
         shell: bash
