@@ -165,6 +165,8 @@ fn main() {
             "cargo:rustc-link-search={}",
             out.join("build").join("Release").display()
         );
+        // Single-config generators (e.g. Ninja, used by the release CI) put libs directly in build/.
+        println!("cargo:rustc-link-search={}", out.join("build").display());
     } else {
         println!("cargo:rustc-link-search={}", out.join("build").display());
     }
