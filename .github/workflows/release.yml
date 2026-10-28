@@ -1,0 +1,114 @@
+name: Release
+
+# Push a tag like `v0.1.0` (or `v0.1.0-beta.1` for a prerelease) to publish a release.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  verify-tag:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compare versions
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_version"
+            exit 1
+          fi
+
+  build-cpu:
+    name: Build quoteme (CPU)
+    needs: verify-tag
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cpu
+      - run: cargo build --locked --release --bin quoteme
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/quoteme.exe dist/
+          cd dist && 7z a "quoteme-${GITHUB_REF_NAME}-windows-x86_64.zip" quoteme.exe && rm quoteme.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: quoteme-cpu
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # Compiling CUDA code only needs the toolkit (nvcc), not a GPU, so this runs
+  # fine on a hosted runner. A GPU is only required to *run* the result.
+  build-cuda:
+    name: Build quoteme-cuda (CUDA)
+    needs: verify-tag
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cuda
+      - name: Install CUDA Toolkit
+        id: cuda
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.6.2"
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration", "thrust"]'
+      - run: cargo build --locked --release --features cuda --bin quoteme-cuda
+      - name: Package (bundle CUDA runtime DLLs)
+        shell: bash
+        run: |
+          mkdir -p dist/stage
+          cp target/release/quoteme-cuda.exe dist/stage/
+          cuda_bin="$(cygpath -u "$CUDA_PATH")/bin"
+          for dll in cudart64_12 cublas64_12 cublasLt64_12; do
+            cp "$cuda_bin/$dll.dll" dist/stage/
+          done
+          cd dist/stage && 7z a "../quoteme-cuda-${GITHUB_REF_NAME}-windows-x86_64.zip" .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: quoteme-cuda
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Checksum & publish release
+    needs: [build-cpu, build-cuda]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        working-directory: artifacts
+        run: |
+          sha256sum *.zip | tee SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=""
+          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" artifacts/* \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes $flags \
+            --notes "Verify downloads with \`SHA256SUMS\`: PowerShell \`Get-FileHash <file> -Algorithm SHA256\`, or \`sha256sum -c SHA256SUMS\`. The CUDA build needs an NVIDIA GPU and driver; CUDA runtime DLLs are bundled in its zip."

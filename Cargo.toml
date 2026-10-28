@@ -1,6 +1,6 @@
 [package]
 name = "quoteme"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 edition = "2021"
 description = "Minimal Whisper-based speech-to-text transcription CLI for Windows"
 
