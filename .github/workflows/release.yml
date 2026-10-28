@@ -55,8 +55,7 @@ jobs:
   build-cuda:
     name: Build quoteme-cuda (CUDA)
     needs: verify-tag
-    # Pinned: windows-latest has VS 2026, whose MSVC is too new for nvcc. Needs VS 2022.
-    runs-on: windows-2025
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -67,14 +66,11 @@ jobs:
         id: cuda
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda: "12.8.1"
+          cuda: "13.2.0" # first release that supports the VS 2026 toolchain on the runner
           method: network
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration", "thrust"]'
       # The VS generator can't find the CUDA MSBuild integration on hosted runners,
       # so use Ninja + cl.exe, which only need nvcc.
       - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          vsversion: "[17.0,18.0)"
       - name: Build
         env:
           CMAKE_GENERATOR: Ninja
@@ -85,9 +81,11 @@ jobs:
           mkdir -p dist/stage
           cp target/release/quoteme-cuda.exe dist/stage/
           cuda_bin="$(cygpath -u "$CUDA_PATH")/bin"
-          for dll in cudart64_12 cublas64_12 cublasLt64_12; do
-            cp "$cuda_bin/$dll.dll" dist/stage/
+          # CUDA 13 keeps DLLs in bin/x64; older toolkits use bin/ directly.
+          for dll in cudart64 cublas64 cublasLt64; do
+            find "$cuda_bin" -name "${dll}_*.dll" -exec cp {} dist/stage/ \;
           done
+          ls dist/stage
           cd dist/stage && 7z a "../quoteme-cuda-${GITHUB_REF_NAME}-windows-x86_64.zip" .
       - uses: actions/upload-artifact@v7
         with:
