@@ -12,6 +12,44 @@ Long recordings are transcribed incrementally in pause-delimited chunks while yo
 stop, only the unprocessed tail normally remains, so completion time does not grow with the full
 length of the recording.
 
+## Installing (prebuilt release)
+
+Prebuilt Windows binaries are attached to each [GitHub release](https://github.com/ColinKennedy/quoteme/releases).
+
+1. **Pick a binary.**
+   - `quoteme-cuda-<version>-windows-x86_64.zip` — GPU-accelerated; needs an NVIDIA GPU (Turing / RTX 20-series or newer) and a current NVIDIA driver. The CUDA runtime DLLs are bundled, so no CUDA Toolkit install is needed.
+   - `quoteme-<version>-windows-x86_64.zip` — CPU only; works on any machine, but is slower.
+2. **Download a Whisper model.** `ggml-medium.en-q5_0.bin` (English, ~540 MB; quantized medium, a good balance of speed and accuracy) is attached to the release as a quick start. For better accuracy, download a different model such as the full-precision `ggml-medium.en.bin` or the smaller `ggml-small.en.bin` from [ggerganov/whisper.cpp on Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/tree/main). Larger models are more accurate but slower and use more memory. Use a non-`.en` model for languages other than English.
+3. **Verify the downloads.** Download `SHA256SUMS` from the release into the same folder and compare:
+
+   ```powershell
+   Get-FileHash .\quoteme-cuda-v0.1.0-beta.2-windows-x86_64.zip -Algorithm SHA256
+   Get-Content .\SHA256SUMS
+   ```
+
+   The hashes must match exactly. (On WSL / Bash: `sha256sum -c SHA256SUMS --ignore-missing`.)
+4. **Extract the zip** to a permanent folder, e.g. `C:\Tools\quoteme\`, and keep the DLLs next to the `.exe` in the CUDA build. Optionally add that folder to your `PATH`.
+5. **Put the model somewhere permanent** (e.g. `C:\models\ggml-medium.en-q5_0.bin`) and point the config at its on-disk path:
+
+   ```powershell
+   .\quoteme-cuda.exe configuration set transcription.model_path "C:\models\ggml-medium.en-q5_0.bin"
+   ```
+
+   (Use `quoteme.exe` for the CPU build.) Without `transcription.model_path`, transcription cannot start.
+6. **Optionally** check your microphone with `quoteme list microphone` and set `recording.device` to part of its name (see [Configuration](#configuration)).
+7. **Start the daemon:**
+
+   ```powershell
+   .\quoteme-cuda.exe start
+   ```
+
+### Using it
+
+- Press the transcribe hotkey (default: **Right Alt**) to start recording and press it again to stop. The text is pasted into the focused window.
+- Press **Escape** to cancel a recording.
+- `quoteme stop` stops the daemon. Recordings and transcripts are kept under `%APPDATA%\quoteme\history`.
+- The model loads on first use, so the first transcription is slower. Run the daemon in the foreground with `quoteme daemon` to see logs if something isn't working.
+
 ## Building
 
 ### Prerequisites

@@ -93,9 +93,25 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
+  fetch-model:
+    name: Fetch Whisper model
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify ggml-medium.en-q5_0.bin
+        run: |
+          curl -fL --retry 3 -o ggml-medium.en-q5_0.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en-q5_0.bin
+          echo "76733e26ad8fe1c7a5bf7531a9d41917b2adc0f20f2e4f5531688a8c6cd88eb0  ggml-medium.en-q5_0.bin" | sha256sum -c -
+      - uses: actions/upload-artifact@v7
+        with:
+          name: model
+          path: ggml-medium.en-q5_0.bin
+          if-no-files-found: error
+
   publish:
     name: Checksum & publish release
-    needs: [build-cpu, build-cuda]
+    needs: [build-cpu, build-cuda, fetch-model]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -107,7 +123,7 @@ jobs:
       - name: Generate SHA-256 checksums
         working-directory: artifacts
         run: |
-          sha256sum *.zip | tee SHA256SUMS
+          sha256sum *.zip ggml-medium.en-q5_0.bin | tee SHA256SUMS
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -118,4 +134,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" artifacts/* \
             --title "$GITHUB_REF_NAME" \
             --generate-notes $flags \
-            --notes "Verify downloads with \`SHA256SUMS\`: PowerShell \`Get-FileHash <file> -Algorithm SHA256\`, or \`sha256sum -c SHA256SUMS\`. The CUDA build needs an NVIDIA GPU and driver; CUDA runtime DLLs are bundled in its zip."
+            --notes "Verify downloads with \`SHA256SUMS\`: PowerShell \`Get-FileHash <file> -Algorithm SHA256\`, or \`sha256sum -c SHA256SUMS\`. The CUDA build needs an NVIDIA GPU and driver; CUDA runtime DLLs are bundled in its zip. ggml-medium.en-q5_0.bin is a Whisper model (other models: https://huggingface.co/ggerganov/whisper.cpp) - see the README for setup."
